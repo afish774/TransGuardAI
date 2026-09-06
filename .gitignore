@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Python Virtual Environments & Cache
+transguard-env/
+env/
+venv/
+.venv/
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & Secret Keys
+.env
+.env.local
+.env.edge
+.env.*.local
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+*.local
+
+# Binaries & MediaMTX Executables
+*.exe
+mediamtx/mediamtx.exe
+mediamtx/*.exe
+
+# AI Weights & Task Models (Large files)
+*.pt
+*.task
+
+# Runtime Uploads & Logs
+uploads/evidence/*
+!uploads/evidence/.gitkeep
+uploads/watchlist/*
+!uploads/watchlist/.gitkeep
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+*.webp

@@ -1,0 +1,25 @@
+# ==========================================
+# TRANS GUARD AI — Render Deployment Blueprint
+# ==========================================
+# Deploy with: Connect this repo to Render and it will auto-detect this file.
+# Or manually: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: transguard-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/auth/login
+    envVars:
+      - key: MONGO_URI
+        sync: false  # Set manually in Render dashboard (use MongoDB Atlas free tier)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEFAULT_EDGE_API_KEY
+        sync: false  # Set manually to match your .env.edge EDGE_API_KEY
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
