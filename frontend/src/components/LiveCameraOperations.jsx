@@ -1,11 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ImagePlus, LoaderCircle, Plus,
-  ShieldAlert, UploadCloud, Video, WifiOff, X,
+  AlertTriangle, ImagePlus, LoaderCircle, Plus,
+  UploadCloud, Video, WifiOff, X,
 } from 'lucide-react';
 import { API_BASE_URL, MEDIA_MTX_HLS_URL, MEDIA_MTX_URL } from '../config';
-
-const zoneStroke = '#f97316';
 
 function apiHeaders(token) {
   return { Authorization: `Bearer ${token}` };
@@ -29,160 +27,97 @@ function evidenceUrl(incident) {
     : incident.evidence_image_url;
 }
 
-function incidentDescription(incident) {
-  const type = incident.incident_type;
-  if (type === 'UNATTENDED_BAGGAGE') {
-    const objectClass = incidentValue(incident, 'objectClass') || 'object';
-    const duration = incidentValue(incident, 'stationarySeconds');
-    return `Unattended ${objectClass}${duration !== undefined ? ` for ${Number(duration).toFixed(1)} seconds` : ''}.`;
-  }
-  if (type === 'ZONE_INTRUSION') {
-    return `Restricted-zone entry detected at ${formatPoint(incidentValue(incident, 'point'))}.`;
-  }
-  if (type === 'WATCHLIST_MATCH') {
-    return `Potential watchlist match: ${incidentValue(incident, 'identity') || 'unknown identity'}.`;
-  }
-  if (type === 'FALL_DETECTED') {
-    return `Possible fall detected${incidentValue(incident, 'persons') ? ` with ${incidentValue(incident, 'persons')} person(s) in frame` : ''}.`;
-  }
-  return incident.incident_type || 'Incident detected.';
+// Numeric metadata can arrive as a number or a numeric string depending on the
+// multipart encoding, and may legitimately be absent. Coerce defensively so a
+// missing field renders an em dash instead of "NaN" or crashing on .toFixed().
+function num(value, digits = 1) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toFixed(digits) : null;
 }
 
-function ZoneEditor({ cameraId, token, onClose }) {
-  const overlayRef = useRef(null);
-  const [points, setPoints] = useState([]);
-  const [draggedIndex, setDraggedIndex] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
+function list(value) {
+  return Array.isArray(value) ? value.join(', ') : null;
+}
 
-  const pointAtEvent = useCallback((event) => {
-    const rect = overlayRef.current.getBoundingClientRect();
+// Per-pillar presentation registry. Each entry maps an incident type to a
+// one-line summary and a set of metadata chips. Returning chips as data
+// (rather than JSX per branch) keeps every pillar rendering through one
+// code path, so a new incident type cannot introduce a mapping error.
+const PILLAR_VIEWS = {
+  OVERCROWD_DETECTED: (get) => ({
+    summary: `Crowd density exceeded the safe threshold (${get('personCount') ?? '—'} people detected).`,
+    chips: [
+      ['Current', get('personCount')],
+      ['Peak', get('peakCount')],
+      ['Threshold', get('threshold')],
+    ],
+  }),
+  UNATTENDED_BAGGAGE: (get) => ({
+    summary: `Unattended ${get('objectClass') || 'object'}${num(get('unattendedSeconds') ?? get('stationarySeconds')) ? ` for ${num(get('unattendedSeconds') ?? get('stationarySeconds'))} seconds` : ''}.`,
+    chips: [
+      ['Object', get('objectClass')],
+      ['Unattended', num(get('unattendedSeconds')) && `${num(get('unattendedSeconds'))} s`],
+      ['Stationary', num(get('stationarySeconds')) && `${num(get('stationarySeconds'))} s`],
+      ['Track', get('trackId')],
+    ],
+  }),
+  FALL_DETECTED: (get) => ({
+    summary: `Possible fall detected${get('trackId') !== undefined ? ` for track #${get('trackId')}` : ''}. Verify immediately.`,
+    chips: [
+      ['Track', get('trackId')],
+      ['People in frame', get('persons')],
+    ],
+  }),
+  CRIME_WEAPON_DETECTED: (get) => ({
+    summary: `Possible ${get('weapon') || 'weapon'} detected on track #${get('trackId') ?? '—'}.`,
+    chips: [
+      ['Weapon', get('weapon')],
+      ['Model confidence', num(get('confidence')) && `${num(get('confidence'))}%`],
+      ['Track', get('trackId')],
+    ],
+  }),
+  CRIME_VIOLENCE_DETECTED: (get) => ({
+    summary: `Violent interaction detected between tracks ${list(get('trackIds')) || '—'}.`,
+    chips: [
+      ['Tracks', list(get('trackIds'))],
+      ['Overlap (IoU)', num(get('iou'), 3)],
+      ['Wrist velocity', num(get('wristSpeedPxPerSec')) && `${num(get('wristSpeedPxPerSec'))} px/s`],
+    ],
+  }),
+  WATCHLIST_MATCH: (get) => ({
+    summary: `Potential watchlist match: ${get('identity') || 'unknown identity'}.`,
+    chips: [
+      ['Identity', get('identity')],
+      ['Track', get('trackId')],
+    ],
+  }),
+  ZONE_INTRUSION: (get) => ({
+    summary: `Restricted-zone entry detected at ${formatPoint(get('point'))}.`,
+    chips: [
+      ['Point', Array.isArray(get('point')) ? formatPoint(get('point')) : null],
+      ['Track', get('trackId')],
+    ],
+  }),
+};
+
+// Resolves an incident into { summary, chips }. Unknown incident types degrade
+// to a readable label rather than rendering blank, so an engine-side addition
+// never produces an empty log entry in the operator UI.
+function describeIncident(incident) {
+  const get = (key) => incidentValue(incident, key);
+  const view = PILLAR_VIEWS[incident?.incident_type];
+  if (!view) {
     return {
-      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+      summary: (incident?.incident_type || 'INCIDENT').replace(/_/g, ' ').toLowerCase(),
+      chips: [],
     };
-  }, []);
-
-  const closestPointIndex = useCallback((point) => {
-    const threshold = 0.028;
-    let index = -1;
-    let bestDistance = Infinity;
-    points.forEach((candidate, candidateIndex) => {
-      const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y);
-      if (distance < threshold && distance < bestDistance) {
-        index = candidateIndex;
-        bestDistance = distance;
-      }
-    });
-    return index;
-  }, [points]);
-
-  const onPointerDown = (event) => {
-    event.preventDefault();
-    const point = pointAtEvent(event);
-    const existingIndex = closestPointIndex(point);
-    if (existingIndex >= 0) {
-      setDraggedIndex(existingIndex);
-      event.currentTarget.setPointerCapture(event.pointerId);
-      return;
-    }
-    setPoints((current) => [...current, point]);
+  }
+  const { summary, chips } = view(get);
+  return {
+    summary,
+    chips: chips.filter(([, value]) => value !== undefined && value !== null && value !== ''),
   };
-
-  const onPointerMove = (event) => {
-    if (draggedIndex === null) return;
-    const point = pointAtEvent(event);
-    setPoints((current) => current.map((existing, index) => (index === draggedIndex ? point : existing)));
-  };
-
-  const stopDragging = (event) => {
-    if (draggedIndex !== null && event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    setDraggedIndex(null);
-  };
-
-  const saveZone = async () => {
-    if (points.length < 3) {
-      setError('Add at least three points to create a zone.');
-      return;
-    }
-    setSaving(true);
-    setError('');
-    setMessage('');
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/edge/zone`, {
-        method: 'POST',
-        headers: { ...apiHeaders(token), 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          camera_id: cameraId,
-          polygon: points.map((point) => [Number(point.x.toFixed(6)), Number(point.y.toFixed(6))]),
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Unable to save the zone.');
-      setMessage('Zone saved. The edge worker will apply it on its next poll.');
-    } catch (saveError) {
-      setError(saveError.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const svgPoints = points.map((point) => `${point.x * 100},${point.y * 100}`).join(' ');
-
-  return (
-    <div className="fixed inset-0 z-[2000] bg-black/80 p-4 flex items-center justify-center">
-      <div className="w-full max-w-5xl bg-zinc-950 border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
-        <div className="px-5 py-4 flex items-center justify-between border-b border-white/10">
-          <div>
-            <h2 className="font-bold text-white">Define restricted zone — {cameraId}</h2>
-            <p className="text-xs text-zinc-400 mt-1">Click to add vertices; drag a vertex to refine it. Coordinates are stored normalized to the video frame.</p>
-          </div>
-          <button type="button" onClick={onClose} className="p-2 text-zinc-400 hover:text-white" aria-label="Close zone editor"><X size={20} /></button>
-        </div>
-
-        <div className="p-5">
-          <div className="relative aspect-video rounded-xl overflow-hidden bg-black border border-white/10">
-            <LiveVideo cameraId={cameraId} compact />
-            <svg
-              ref={overlayRef}
-              className="absolute inset-0 w-full h-full cursor-crosshair touch-none"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-              onPointerDown={onPointerDown}
-              onPointerMove={onPointerMove}
-              onPointerUp={stopDragging}
-              onPointerCancel={stopDragging}
-            >
-              {points.length >= 2 && <polyline points={svgPoints} fill="rgba(249,115,22,0.20)" stroke={zoneStroke} strokeWidth="0.55" />}
-              {points.length >= 3 && <polygon points={svgPoints} fill="rgba(249,115,22,0.20)" stroke={zoneStroke} strokeWidth="0.55" />}
-              {points.map((point, index) => (
-                <g key={index}>
-                  <circle cx={point.x * 100} cy={point.y * 100} r="1.4" fill="#fff" stroke={zoneStroke} strokeWidth="0.6" />
-                  <text x={point.x * 100 + 1.7} y={point.y * 100 - 1.7} fill="#fff" fontSize="3.2">{index + 1}</text>
-                </g>
-              ))}
-            </svg>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="text-xs text-zinc-400">{points.length} point{points.length === 1 ? '' : 's'} defined</div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => setPoints((current) => current.slice(0, -1))} disabled={!points.length} className="px-3 py-2 rounded-lg text-xs font-bold bg-white/10 hover:bg-white/15 disabled:opacity-40">Undo</button>
-              <button type="button" onClick={() => setPoints([])} disabled={!points.length} className="px-3 py-2 rounded-lg text-xs font-bold bg-white/10 hover:bg-white/15 disabled:opacity-40">Clear</button>
-              <button type="button" onClick={saveZone} disabled={saving} className="px-4 py-2 rounded-lg text-xs font-bold bg-orange-500 hover:bg-orange-400 text-white disabled:opacity-60 flex items-center gap-2">
-                {saving ? <LoaderCircle size={14} className="animate-spin" /> : <Check size={14} />} Save zone
-              </button>
-            </div>
-          </div>
-          {message && <p className="mt-3 text-sm text-emerald-400">{message}</p>}
-          {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function WatchlistUploadModal({ token, onClose, onUploaded }) {
@@ -210,10 +145,15 @@ function WatchlistUploadModal({ token, onClose, onUploaded }) {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Unable to upload watchlist target.');
-      onUploaded(data.target);
+      // Clear the form before unmounting so a reopened modal starts clean.
+      setName('');
+      setImage(null);
+      onUploaded(data.target || { name: name.trim() });
       onClose();
     } catch (uploadError) {
-      setError(uploadError.message);
+      // Network failures reject rather than resolve, so they land here too;
+      // nothing escapes as an unhandled rejection.
+      setError(uploadError?.message || 'Upload failed. Check your connection and try again.');
     } finally {
       setSaving(false);
     }
@@ -248,7 +188,11 @@ function WatchlistUploadModal({ token, onClose, onUploaded }) {
   );
 }
 
-function LiveVideo({ cameraId, compact = false }) {
+// Memoised: the parent re-renders whenever a new incident arrives over the
+// socket. Without this, every incident would remount the <video> element and
+// tear down the peer connection, visibly freezing the stream. Props are
+// primitives, so the default shallow comparison is sufficient.
+const LiveVideo = memo(function LiveVideo({ cameraId, compact = false }) {
   const videoRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const [state, setState] = useState('connecting');
@@ -325,11 +269,10 @@ function LiveVideo({ cameraId, compact = false }) {
       )}
     </div>
   );
-}
+});
 
 export function DashboardOperationsView({ cameras, token }) {
   const [selectedCameraId, setSelectedCameraId] = useState(cameras[0]?.camera_id || 'cam0');
-  const [zoneOpen, setZoneOpen] = useState(false);
   const [watchlistOpen, setWatchlistOpen] = useState(false);
   const [uploadedTarget, setUploadedTarget] = useState(null);
   const cameraId = cameras.some((camera) => camera.camera_id === selectedCameraId)
@@ -342,11 +285,10 @@ export function DashboardOperationsView({ cameras, token }) {
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-black tracking-tight text-gray-900 dark:text-white">Live safety operations</h1>
-            <p className="mt-1 text-sm text-gray-500 dark:text-zinc-400">Configure camera zones and manage watchlist identities.</p>
+            <p className="mt-1 text-sm text-gray-500 dark:text-zinc-400">Monitor live camera feeds and manage watchlist identities.</p>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => setWatchlistOpen(true)} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-800 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-white dark:hover:bg-white/10"><ImagePlus size={15} /> Add target</button>
-            <button type="button" onClick={() => setZoneOpen(true)} className="inline-flex items-center gap-2 rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white hover:bg-orange-400"><ShieldAlert size={15} /> Define zone</button>
           </div>
         </div>
 
@@ -367,7 +309,6 @@ export function DashboardOperationsView({ cameras, token }) {
         {uploadedTarget && <p className="mt-4 rounded-lg bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">Uploaded {uploadedTarget.name}. Edge nodes will receive it at their next watchlist sync.</p>}
       </div>
 
-      {zoneOpen && <ZoneEditor cameraId={cameraId} token={token} onClose={() => setZoneOpen(false)} />}
       {watchlistOpen && <WatchlistUploadModal token={token} onClose={() => setWatchlistOpen(false)} onUploaded={setUploadedTarget} />}
     </main>
   );
@@ -399,20 +340,27 @@ export function IncidentLogView({ alerts }) {
           {alerts.length === 0 && <div className="rounded-xl border border-dashed border-gray-300 bg-white p-10 text-center text-sm text-gray-500 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-400">No incidents have been received.</div>}
           {alerts.map((incident) => {
             const image = evidenceUrl(incident);
+            const { summary, chips } = describeIncident(incident);
             return (
-              <article key={incident.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-zinc-900/80">
+              <article key={incident.id || incident._id} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-zinc-900/80">
                 <div className="flex flex-col gap-4 p-4 sm:flex-row">
                   {image ? <img src={image} alt="Incident evidence" className="h-36 w-full rounded-lg bg-black object-cover sm:w-56" /> : <div className="flex h-36 w-full items-center justify-center rounded-lg bg-zinc-950 text-zinc-500 sm:w-56"><WifiOff size={25} /></div>}
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-black text-orange-600 dark:text-orange-300"><AlertTriangle size={13} /> {incident.incident_type}</span>
-                      <time className="text-xs font-medium text-gray-500 dark:text-zinc-400">{new Date(incident.timestamp).toLocaleString()}</time>
+                      <time className="text-xs font-medium text-gray-500 dark:text-zinc-400">{incident.timestamp ? new Date(incident.timestamp).toLocaleString() : '—'}</time>
                     </div>
                     <h2 className="mt-3 text-base font-bold text-gray-900 dark:text-white">{incident.camera_id}</h2>
-                    <p className="mt-1 text-sm text-gray-600 dark:text-zinc-300">{incidentDescription(incident)}</p>
-                    {incident.incident_type === 'UNATTENDED_BAGGAGE' && <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Object: {incidentValue(incident, 'objectClass') || 'unknown'}</span><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Stationary: {incidentValue(incident, 'stationarySeconds') ?? '—'} sec</span><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Track: {incidentValue(incident, 'trackId') ?? '—'}</span></div>}
-                    {incident.incident_type === 'ZONE_INTRUSION' && <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Point: {formatPoint(incidentValue(incident, 'point'))}</span><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Track: {incidentValue(incident, 'trackId') ?? '—'}</span></div>}
-                    {incident.incident_type === 'WATCHLIST_MATCH' && <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Identity: {incidentValue(incident, 'identity') || 'unknown'}</span><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Track: {incidentValue(incident, 'trackId') ?? '—'}</span><span className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">Confidence: {incident.confidence ?? '—'}%</span></div>}
+                    <p className="mt-1 text-sm text-gray-600 dark:text-zinc-300">{summary}</p>
+                    {chips.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                        {chips.map(([label, value]) => (
+                          <span key={label} className="rounded bg-gray-100 px-2 py-1 dark:bg-white/10">
+                            {label}: <span className="font-semibold">{String(value)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </article>

@@ -361,30 +361,6 @@ export const CameraNodesView = ({ activeCameras = [], token }) => {
   const [isProvisioning, setIsProvisioning] = useState(false);
   const [provisionError, setProvisionError] = useState('');
 
-  const [isZoneModalOpen, setIsZoneModalOpen] = useState(false);
-  const [zoneCameraId, setZoneCameraId] = useState('');
-  const [zonePolygon, setZonePolygon] = useState('[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]');
-
-  const handleZoneSubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const parsedPoly = JSON.parse(zonePolygon);
-      const res = await fetch('/api/edge/zone', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('tg_token')}` },
-        body: JSON.stringify({ camera_id: zoneCameraId, polygon: parsedPoly })
-      });
-      if (res.ok) {
-        setIsZoneModalOpen(false);
-        alert('Zone Updated Successfully!');
-      } else {
-        alert('Failed to update zone');
-      }
-    } catch {
-      alert("Invalid JSON format or network error");
-    }
-  };
-
   const handleProvisionSubmit = async (e) => {
     e.preventDefault();
     setIsProvisioning(true);
@@ -492,7 +468,6 @@ export const CameraNodesView = ({ activeCameras = [], token }) => {
                     <th className="py-3 px-6 text-xs font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-wider">Node</th>
                     <th className="py-3 px-6 text-xs font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-wider">FPS</th>
                     <th className="py-3 px-6 text-xs font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-wider">Last Heartbeat</th>
-                    <th className="py-3 px-6 text-xs font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-white/5">
@@ -524,43 +499,10 @@ export const CameraNodesView = ({ activeCameras = [], token }) => {
                       <td className="py-4 px-6 text-sm text-gray-600 dark:text-zinc-400">
                         {cam.last_heartbeat ? new Date(cam.last_heartbeat).toLocaleTimeString() : '—'}
                       </td>
-                      <td className="py-4 px-6 text-sm">
-                        <button 
-                          onClick={() => { setZoneCameraId(cam.camera_id); setIsZoneModalOpen(true); }}
-                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded border-none text-xs font-bold tracking-wide"
-                        >
-                          Define Zone
-                        </button>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-          </div>
-        )}
-
-        {/* Define Zone Modal */}
-        {isZoneModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-white/10 rounded-2xl p-6 w-full max-w-md shadow-2xl animate-fade-in-up">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-zinc-100 mb-4">Define Intrusion Zone</h2>
-              <form onSubmit={handleZoneSubmit} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 dark:text-zinc-300 mb-1">Camera ID</label>
-                  <input type="text" readOnly value={zoneCameraId} className="w-full bg-gray-100 dark:bg-white/5 border border-gray-300 dark:border-white/10 rounded-lg px-4 py-2 text-gray-900 dark:text-zinc-100 opacity-70" />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 dark:text-zinc-300 mb-1">Polygon Array (Normalized 0.0 - 1.0)</label>
-                  <textarea required rows={4} value={zonePolygon} onChange={e => setZonePolygon(e.target.value)} className="w-full bg-gray-50 dark:bg-black/50 border border-gray-300 dark:border-white/10 rounded-lg px-4 py-2 text-gray-900 dark:text-zinc-100 focus:outline-none focus:border-indigo-500 font-mono text-sm" />
-                </div>
-                <div className="flex justify-end gap-3 mt-6">
-                  <button type="button" onClick={() => setIsZoneModalOpen(false)} className="px-4 py-2 text-sm font-semibold text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-white/5 rounded-lg">Cancel</button>
-                  <button type="submit" className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-sm">
-                    Save Zone
-                  </button>
-                </div>
-              </form>
             </div>
           </div>
         )}
