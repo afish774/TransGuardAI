@@ -65,11 +65,36 @@ BAGGAGE_CLASSES = {
 FALL_VISIBILITY_THRESHOLD = 0.5
 FALL_ANGLE_THRESHOLD_DEG = 45.0
 FALL_CONFIRM_FRAMES = 5
-BAGGAGE_STATIONARY_SECONDS = 30.0
-BAGGAGE_STATIONARY_PIXEL_TOL = 25.0
+BAGGAGE_STATIONARY_SECONDS = 45.0
+BAGGAGE_STATIONARY_PIXEL_TOL = 10.0
 BAGGAGE_PROXIMITY_RADIUS_PX = 120.0
 FACE_MATCH_TOLERANCE = 0.5
 INCIDENT_COOLDOWN_S = 60.0
+
+# --- Pillar 1: over-crowd detection (spatial density + temporal consensus) ---
+CROWD_PERSON_THRESHOLD = 10
+CROWD_CONSENSUS_FRAMES = 15
+CROWD_RELEASE_FRAMES = 15
+
+# --- Pillar 3: fall detection (skeletal geometry) ---
+FALL_ASPECT_RATIO = 1.0  # bbox width / height above which a body is "horizontal"
+
+# --- Pillar 4: weapon detection (secondary fine-tuned YOLO on person crops) ---
+WEAPON_CLASS_KEYWORDS = ("gun", "pistol", "handgun", "revolver", "rifle",
+                         "weapon", "knife", "blade", "bat", "firearm")
+WEAPON_CONF_THRESHOLD = 0.45
+WEAPON_CONFIRM_FRAMES = 3
+WEAPON_CROP_PADDING = 0.08
+WEAPON_MAX_CROPS_PER_FRAME = 6
+
+# --- Pillar 5: violence detection (IoU + wrist velocity) ---
+VIOLENCE_IOU_THRESHOLD = 0.15
+VIOLENCE_WRIST_SPEED_PX_S = 320.0
+VIOLENCE_CONFIRM_FRAMES = 6
+VIOLENCE_PAIR_TTL_S = 3.0
+
+# Pose is expensive; cap how many person crops we skeletonise per frame.
+POSE_MAX_PERSONS_PER_FRAME = 4
 
 FRAME_QUEUE_SIZE = 2
 INCIDENT_QUEUE_SIZE = 128
@@ -91,6 +116,7 @@ class TrackedObject:
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     last_move_time: float = field(default_factory=time.time)
+    last_attended_time: float = field(default_factory=time.time)
     ref_centroid: Tuple[float, float] = (0.0, 0.0)
 
 
@@ -107,6 +133,10 @@ class EngineConfig:
     ffmpeg_bin: str = "ffmpeg"
     conf: float = 0.45
     mediamtx_rtsp_url: str = "rtsp://127.0.0.1:8554"
+    weapon_model: str = "yolov8n-weapons.pt"
+    weapon_conf: float = WEAPON_CONF_THRESHOLD
+    crowd_threshold: int = CROWD_PERSON_THRESHOLD
+    crowd_frames: int = CROWD_CONSENSUS_FRAMES
 
 
 def configure_worker_logging() -> None:
@@ -142,6 +172,39 @@ def boxes_intersect_with_radius(bag_bbox, person_bbox, radius) -> bool:
     px1, py1, px2, py2 = person_bbox
     ex1, ey1, ex2, ey2 = bx1 - radius, by1 - radius, bx2 + radius, by2 + radius
     return not (px2 < ex1 or px1 > ex2 or py2 < ey1 or py1 > ey2)
+
+
+def bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    """Intersection over Union of two xyxy boxes (Pillar 5)."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    intersection = float(iw * ih)
+    if intersection <= 0.0:
+        return 0.0
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = float(area_a + area_b - intersection)
+    return intersection / union if union > 0 else 0.0
+
+
+def crop_bbox(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: float = 0.0):
+    """Return (crop, offset_xy) clamped to frame bounds, or (None, (0, 0))."""
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    if padding > 0.0:
+        pad_x = int((x2 - x1) * padding)
+        pad_y = int((y2 - y1) * padding)
+        x1, y1, x2, y2 = x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(0, min(width, x2))
+    y2 = max(0, min(height, y2))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None, (0, 0)
+    return frame[y1:y2, x1:x2], (x1, y1)
 
 
 def put_latest(destination, item) -> None:
@@ -330,31 +393,33 @@ class Watchlist:
         return None
 
 
-class FallDetector:
-    # NOTE ON MEDIAPIPE VERSION: mp.solutions (the legacy Pose/Hands/FaceMesh
-    # API used below) was removed from the mediapipe package entirely in
-    # mediapipe>=0.10.30 -- on those versions even the explicit submodule
-    # import below fails with ModuleNotFoundError, not just AttributeError,
-    # because the whole `mediapipe.python` subpackage is gone. Pin
-    # mediapipe<=0.10.21 (confirmed working; 0.10.30+ confirmed broken) in
-    # requirements.txt/pip install for this class to do anything. Migrating
-    # to the newer mediapipe.tasks PoseLandmarker API is possible but is a
-    # separate, larger change (different result shape, no PoseLandmark enum,
-    # and it needs a downloaded .task model file) -- out of scope here.
-    #
-    # The import itself is done HERE (inside __init__), not at module level,
-    # and via the explicit mediapipe.python.solutions.pose path rather than
-    # `import mediapipe as mp` + `mp.solutions.pose`, for two reasons:
-    #   1. Only the inference worker needs pose detection. capture_worker
-    #      and telemetry_worker never touch mediapipe, so on a version where
-    #      it imports (and drags in tensorflow) at all, they should not pay
-    #      for that import at all.
-    #   2. On Windows, each worker is a freshly spawned process that re-runs
-    #      this module from scratch, and some mediapipe builds do not
-    #      reliably re-populate the `mediapipe.solutions` attribute on the
-    #      top-level package inside that spawned process. Importing the
-    #      real submodule by its own dotted path sidesteps that attribute
-    #      entirely.
+class PoseEngine:
+    """MediaPipe Pose wrapper shared by fall detection (Pillar 3) and
+    violence detection (Pillar 5).
+
+    NOTE ON MEDIAPIPE VERSION: mp.solutions (the legacy Pose/Hands/FaceMesh
+    API used below) was removed from the mediapipe package entirely in
+    mediapipe>=0.10.30 -- on those versions even the explicit submodule
+    import below fails with ModuleNotFoundError, not just AttributeError,
+    because the whole `mediapipe.python` subpackage is gone. Pin
+    mediapipe<=0.10.21 (confirmed working; 0.10.30+ confirmed broken) in
+    requirements.txt/pip install for this class to do anything.
+
+    The import itself is done HERE (inside __init__), not at module level,
+    and via the explicit mediapipe.python.solutions.pose path rather than
+    `import mediapipe as mp` + `mp.solutions.pose`, for two reasons:
+      1. Only the inference worker needs pose detection. capture_worker
+         and telemetry_worker never touch mediapipe, so on a version where
+         it imports (and drags in tensorflow) at all, they should not pay
+         for that import at all.
+      2. On Windows, each worker is a freshly spawned process that re-runs
+         this module from scratch, and some mediapipe builds do not
+         reliably re-populate the `mediapipe.solutions` attribute on the
+         top-level package inside that spawned process. Importing the
+         real submodule by its own dotted path sidesteps that attribute
+         entirely.
+    """
+
     def __init__(self):
         self.pose = None
         self._pose_landmark = None
@@ -363,7 +428,7 @@ class FallDetector:
         except ImportError as exc:
             mp_pose = None
             log.warning(
-                "Pose detection unavailable, fall detection disabled: %s", exc
+                "Pose detection unavailable, fall/violence analysis disabled: %s", exc
             )
         if mp_pose is not None:
             self.pose = mp_pose.Pose(
@@ -373,52 +438,271 @@ class FallDetector:
                 min_tracking_confidence=0.5,
             )
             self._pose_landmark = mp_pose.PoseLandmark
-        self.fall_streak = 0
+        # Per-track fall streaks so one person falling cannot be cancelled by
+        # another person standing in the next frame.
+        self.fall_streaks: Dict[int, int] = {}
+
+    @property
+    def available(self) -> bool:
+        return self.pose is not None
 
     def close(self) -> None:
         if self.pose is not None:
             self.pose.close()
 
-    def process(self, frame_bgr: np.ndarray) -> bool:
-        if self.pose is None:
-            return False
-        result = self.pose.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+    def landmarks(self, crop_bgr: np.ndarray, offset: Tuple[int, int]):
+        """Return {landmark_name: (x_px, y_px, visibility)} in FRAME pixel
+        coordinates, or None. Pose runs on the person crop (not the whole
+        frame) so multi-person scenes get one skeleton each."""
+        if self.pose is None or crop_bgr is None or crop_bgr.size == 0:
+            return None
+        result = self.pose.process(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
         if not result.pose_landmarks:
-            self.fall_streak = 0
-            return False
+            return None
+        crop_h, crop_w = crop_bgr.shape[:2]
+        off_x, off_y = offset
+        landmark_enum = self._pose_landmark
+        points: Dict[str, Tuple[float, float, float]] = {}
+        for landmark in landmark_enum:
+            item = result.pose_landmarks.landmark[landmark.value]
+            points[landmark.name] = (
+                item.x * crop_w + off_x,
+                item.y * crop_h + off_y,
+                float(item.visibility),
+            )
+        return points
 
-        landmarks = result.pose_landmarks.landmark
-        pose_landmark = self._pose_landmark
-        required = [
-            pose_landmark.LEFT_HIP,
-            pose_landmark.RIGHT_HIP,
-            pose_landmark.LEFT_ANKLE,
-            pose_landmark.RIGHT_ANKLE,
-        ]
-        if any(landmarks[index.value].visibility < FALL_VISIBILITY_THRESHOLD for index in required):
-            self.fall_streak = 0
-            return False
+    def is_fall(self, track_id: int, bbox: Tuple[int, int, int, int], points) -> bool:
+        """Pillar 3: bbox becomes wider than tall AND the nose Y drops below
+        (i.e. is numerically greater than) the hip Y -- head at/under hip
+        level, which upright and even crouching postures do not satisfy."""
+        x1, y1, x2, y2 = bbox
+        box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+        horizontal = (box_w / box_h) > FALL_ASPECT_RATIO
 
-        height, width = frame_bgr.shape[:2]
+        head_below_hips = False
+        if points:
+            nose = points.get("NOSE")
+            left_hip = points.get("LEFT_HIP")
+            right_hip = points.get("RIGHT_HIP")
+            if nose and left_hip and right_hip:
+                visible = (
+                    nose[2] >= FALL_VISIBILITY_THRESHOLD
+                    and left_hip[2] >= FALL_VISIBILITY_THRESHOLD
+                    and right_hip[2] >= FALL_VISIBILITY_THRESHOLD
+                )
+                if visible:
+                    hip_y = (left_hip[1] + right_hip[1]) / 2.0
+                    # Image Y grows downward: nose_y >= hip_y means the head
+                    # has dropped to or below hip height.
+                    head_below_hips = nose[1] >= hip_y
 
-        def point(index):
-            return np.array([landmarks[index.value].x * width, landmarks[index.value].y * height])
-
-        hip_mid = (point(pose_landmark.LEFT_HIP) + point(pose_landmark.RIGHT_HIP)) / 2.0
-        ankle_mid = (point(pose_landmark.LEFT_ANKLE) + point(pose_landmark.RIGHT_ANKLE)) / 2.0
-        torso = hip_mid - ankle_mid
-        norm = np.linalg.norm(torso)
-        if norm < 1e-6:
-            self.fall_streak = 0
-            return False
-
-        cosang = float(np.dot(torso / norm, np.array([0.0, -1.0])))
-        angle_deg = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
-        self.fall_streak = self.fall_streak + 1 if angle_deg > FALL_ANGLE_THRESHOLD_DEG else 0
-        if self.fall_streak >= FALL_CONFIRM_FRAMES:
-            self.fall_streak = 0
+        # Without a skeleton we fall back to pure geometry, which needs the
+        # same number of consecutive frames to confirm.
+        fallen = horizontal and (head_below_hips or not self.available)
+        streak = self.fall_streaks.get(track_id, 0) + 1 if fallen else 0
+        self.fall_streaks[track_id] = streak
+        if streak >= FALL_CONFIRM_FRAMES:
+            self.fall_streaks[track_id] = 0
             return True
         return False
+
+    def forget(self, active_ids) -> None:
+        for track_id in list(self.fall_streaks):
+            if track_id not in active_ids:
+                del self.fall_streaks[track_id]
+
+
+# Backwards-compatible alias: older call sites referenced FallDetector.
+FallDetector = PoseEngine
+
+
+class WeaponDetector:
+    """Pillar 4: secondary fine-tuned YOLO run ONLY on person crops.
+
+    Running the weapon model over the full frame wastes CPU on background and
+    inflates false positives; weapons are (almost) always carried, so the
+    person boxes from the primary model are the only regions worth scanning.
+    """
+
+    def __init__(self, weights_path: str, conf: float = WEAPON_CONF_THRESHOLD):
+        self.model = None
+        self.conf = conf
+        self.names: Dict[int, str] = {}
+        self.streaks: Dict[int, int] = {}
+        if not weights_path:
+            return
+        if YOLO is None:
+            log.warning("ultralytics missing; weapon detection disabled")
+            return
+        if not os.path.exists(weights_path):
+            log.warning(
+                "Weapon weights '%s' not found; weapon detection disabled. "
+                "Set WEAPON_MODEL / --weapon-model to a fine-tuned .pt file.",
+                weights_path,
+            )
+            return
+        try:
+            self.model = YOLO(weights_path)
+            self.names = dict(getattr(self.model, "names", {}) or {})
+            log.info("Weapon model loaded from %s (classes: %s)",
+                     weights_path, list(self.names.values()))
+        except Exception as exc:
+            log.warning("Failed to load weapon model %s: %s", weights_path, exc)
+            self.model = None
+
+    @property
+    def available(self) -> bool:
+        return self.model is not None
+
+    def _is_weapon(self, class_name: str) -> bool:
+        lowered = class_name.lower()
+        return any(keyword in lowered for keyword in WEAPON_CLASS_KEYWORDS)
+
+    def scan(self, frame: np.ndarray, persons) -> List[Tuple[int, str, float, Tuple[int, int, int, int]]]:
+        """Return confirmed [(track_id, weapon_name, confidence, bbox)]."""
+        if self.model is None or not persons:
+            return []
+        hits: List[Tuple[int, str, float, Tuple[int, int, int, int]]] = []
+        seen_ids = set()
+        for track_id, person_bbox in persons[:WEAPON_MAX_CROPS_PER_FRAME]:
+            seen_ids.add(track_id)
+            crop, offset = crop_bbox(frame, person_bbox, WEAPON_CROP_PADDING)
+            if crop is None:
+                continue
+            try:
+                result = self.model.predict(crop, conf=self.conf, verbose=False)[0]
+            except Exception as exc:
+                log.debug("Weapon inference error: %s", exc)
+                continue
+            best = None
+            if result.boxes is not None:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    class_name = str(self.names.get(class_id, class_id))
+                    if not self._is_weapon(class_name):
+                        continue
+                    confidence = float(box.conf[0])
+                    wx1, wy1, wx2, wy2 = (int(v) for v in box.xyxy[0].tolist())
+                    absolute = (wx1 + offset[0], wy1 + offset[1],
+                                wx2 + offset[0], wy2 + offset[1])
+                    if best is None or confidence > best[1]:
+                        best = (class_name, confidence, absolute)
+            if best is None:
+                self.streaks[track_id] = 0
+                continue
+            streak = self.streaks.get(track_id, 0) + 1
+            self.streaks[track_id] = streak
+            if streak >= WEAPON_CONFIRM_FRAMES:
+                hits.append((track_id, best[0], best[1], best[2]))
+        for track_id in list(self.streaks):
+            if track_id not in seen_ids:
+                del self.streaks[track_id]
+        return hits
+
+
+class ViolenceDetector:
+    """Pillar 5: spatiotemporal heuristic -- high IoU between two people plus
+    erratic, high-speed wrist motion (delta distance / delta time)."""
+
+    def __init__(self):
+        # (id_a, id_b) -> {"streak": int, "last": timestamp}
+        self.pairs: Dict[Tuple[int, int], Dict[str, float]] = {}
+        # track_id -> (wrist_points, timestamp)
+        self.previous_wrists: Dict[int, Tuple[Dict[str, Tuple[float, float]], float]] = {}
+
+    @staticmethod
+    def _wrists(points) -> Dict[str, Tuple[float, float]]:
+        wrists: Dict[str, Tuple[float, float]] = {}
+        if not points:
+            return wrists
+        for name in ("LEFT_WRIST", "RIGHT_WRIST"):
+            landmark = points.get(name)
+            if landmark and landmark[2] >= FALL_VISIBILITY_THRESHOLD:
+                wrists[name] = (landmark[0], landmark[1])
+        return wrists
+
+    def wrist_speed(self, track_id: int, points, now: float) -> float:
+        """Max wrist speed in px/s since the previous observation."""
+        wrists = self._wrists(points)
+        previous = self.previous_wrists.get(track_id)
+        self.previous_wrists[track_id] = (wrists, now)
+        if not previous or not wrists:
+            return 0.0
+        old_wrists, old_time = previous
+        elapsed = now - old_time
+        if elapsed <= 1e-3:
+            return 0.0
+        speeds = [
+            dist(position, old_wrists[name]) / elapsed
+            for name, position in wrists.items()
+            if name in old_wrists
+        ]
+        return max(speeds) if speeds else 0.0
+
+    def evaluate(self, persons, speeds: Dict[int, float], now: float):
+        """Return [(id_a, id_b, iou, peak_speed)] for confirmed fights."""
+        confirmed = []
+        active_pairs = set()
+        for index, (id_a, box_a) in enumerate(persons):
+            for id_b, box_b in persons[index + 1:]:
+                iou = bbox_iou(box_a, box_b)
+                if iou < VIOLENCE_IOU_THRESHOLD:
+                    continue
+                key = (min(id_a, id_b), max(id_a, id_b))
+                active_pairs.add(key)
+                peak = max(speeds.get(id_a, 0.0), speeds.get(id_b, 0.0))
+                entry = self.pairs.setdefault(key, {"streak": 0.0, "last": now, "peak": 0.0})
+                entry["last"] = now
+                if peak >= VIOLENCE_WRIST_SPEED_PX_S:
+                    entry["streak"] += 1
+                    entry["peak"] = max(entry["peak"], peak)
+                else:
+                    # Decay rather than reset: real fights have brief pauses.
+                    entry["streak"] = max(0.0, entry["streak"] - 0.5)
+                if entry["streak"] >= VIOLENCE_CONFIRM_FRAMES:
+                    confirmed.append((key[0], key[1], iou, entry["peak"]))
+                    entry["streak"] = 0.0
+                    entry["peak"] = 0.0
+        for key in list(self.pairs):
+            if now - self.pairs[key]["last"] > VIOLENCE_PAIR_TTL_S:
+                del self.pairs[key]
+        active_ids = {track_id for track_id, _ in persons}
+        for track_id in list(self.previous_wrists):
+            if track_id not in active_ids:
+                del self.previous_wrists[track_id]
+        return confirmed
+
+
+class CrowdDetector:
+    """Pillar 1: density counting with temporal consensus so flickering
+    detections cannot raise an alarm on their own."""
+
+    def __init__(self, threshold: int = CROWD_PERSON_THRESHOLD,
+                 confirm_frames: int = CROWD_CONSENSUS_FRAMES):
+        self.threshold = threshold
+        self.confirm_frames = confirm_frames
+        self.over_streak = 0
+        self.under_streak = 0
+        self.active = False
+        self.peak = 0
+
+    def update(self, person_count: int) -> Optional[int]:
+        """Return the peak crowd size on the frame the alarm latches, else None."""
+        if person_count > self.threshold:
+            self.over_streak += 1
+            self.under_streak = 0
+            self.peak = max(self.peak, person_count)
+        else:
+            self.under_streak += 1
+            self.over_streak = 0
+            if self.active and self.under_streak >= CROWD_RELEASE_FRAMES:
+                self.active = False
+                self.peak = 0
+        if not self.active and self.over_streak >= self.confirm_frames:
+            self.active = True
+            return self.peak
+        return None
 
 
 class IncidentProcessor:
@@ -430,7 +714,11 @@ class IncidentProcessor:
         self.cfg = cfg
         self.incident_queue = incident_queue
         self.model = YOLO(cfg.yolo_model)
-        self.fall = FallDetector()
+        self.pose = PoseEngine()
+        self.fall = self.pose  # legacy attribute name
+        self.weapons = WeaponDetector(cfg.weapon_model, cfg.weapon_conf)
+        self.violence = ViolenceDetector()
+        self.crowd = CrowdDetector(cfg.crowd_threshold, cfg.crowd_frames)
         self.watchlist = Watchlist()
         self.zone_polygon: List[List[float]] = []
         self.incident_cache: Dict[str, float] = {}
@@ -438,7 +726,7 @@ class IncidentProcessor:
         self.baggage_cache: Dict[int, TrackedObject] = {}
 
     def close(self) -> None:
-        self.fall.close()
+        self.pose.close()
 
     def apply_control(self, control: Dict[str, object]) -> None:
         message_type = control.get("type")
@@ -501,48 +789,131 @@ class IncidentProcessor:
                     cv2.putText(frame, f"{class_name} #{track_id}", (x1, max(20, y1 - 6)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 2)
 
-        if persons and self.fall.process(frame):
-            self.emit("FALL_DETECTED", frame, {"persons": len(persons)}, cache_key="fall_general")
-            cv2.putText(frame, "INCIDENT: FALL DETECTED", (30, 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        active_person_ids = {track_id for track_id, _ in persons}
+
+        # ---- Pillar 1: over-crowd detection (density + temporal consensus) ----
+        crowd_peak = self.crowd.update(len(persons))
+        if crowd_peak is not None:
+            self.emit(
+                "OVERCROWD_DETECTED", frame,
+                {"personCount": len(persons), "peakCount": crowd_peak,
+                 "threshold": self.crowd.threshold},
+                cache_key="overcrowd",
+            )
+        if self.crowd.active:
+            cv2.putText(frame, f"OVERCROWDING: {len(persons)} PERSONS", (30, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(frame, f"Persons: {len(persons)}", (30, frame.shape[0] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # ---- Skeletal pass: one pose per person crop, reused by Pillars 3 & 5 ----
+        # Sorted by box area so the largest (closest, most reliable) subjects
+        # get the limited pose budget.
+        pose_targets = sorted(
+            persons, key=lambda item: -(item[1][2] - item[1][0]) * (item[1][3] - item[1][1])
+        )[:POSE_MAX_PERSONS_PER_FRAME]
+        landmarks_by_id: Dict[int, object] = {}
+        wrist_speeds: Dict[int, float] = {}
+        if self.pose.available:
+            for track_id, person_bbox in pose_targets:
+                crop, offset = crop_bbox(frame, person_bbox)
+                if crop is None:
+                    continue
+                points = self.pose.landmarks(crop, offset)
+                if points is None:
+                    continue
+                landmarks_by_id[track_id] = points
+                wrist_speeds[track_id] = self.violence.wrist_speed(track_id, points, now)
+
+        # ---- Pillar 3: fall detection (skeletal geometry, per track) ----
+        for track_id, person_bbox in persons:
+            if self.pose.is_fall(track_id, person_bbox, landmarks_by_id.get(track_id)):
+                x1, y1, x2, y2 = person_bbox
+                self.emit(
+                    "FALL_DETECTED", frame,
+                    {"trackId": track_id, "persons": len(persons),
+                     "bbox": [x1, y1, x2, y2]},
+                    cache_key=f"fall_{track_id}",
+                )
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(frame, f"FALL DETECTED #{track_id}", (x1, max(20, y1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        self.pose.forget(active_person_ids)
+
+        # ---- Pillar 4: weapon detection on person crops only ----
+        for track_id, weapon_name, weapon_conf, weapon_bbox in self.weapons.scan(frame, persons):
+            wx1, wy1, wx2, wy2 = weapon_bbox
+            self.emit(
+                "CRIME_WEAPON_DETECTED", frame,
+                {"trackId": track_id, "weapon": weapon_name,
+                 "confidence": round(weapon_conf * 100.0, 1),
+                 "bbox": [wx1, wy1, wx2, wy2]},
+                cache_key=f"weapon_{track_id}",
+            )
+            cv2.rectangle(frame, (wx1, wy1), (wx2, wy2), (0, 0, 255), 3)
+            cv2.putText(frame, f"WEAPON: {weapon_name.upper()} {weapon_conf:.2f}",
+                        (wx1, max(20, wy1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        # ---- Pillar 5: violence detection (IoU + wrist velocity) ----
+        for id_a, id_b, iou, peak_speed in self.violence.evaluate(persons, wrist_speeds, now):
+            self.emit(
+                "CRIME_VIOLENCE_DETECTED", frame,
+                {"trackIds": [id_a, id_b], "iou": round(iou, 3),
+                 "wristSpeedPxPerSec": round(peak_speed, 1)},
+                cache_key=f"violence_{id_a}_{id_b}",
+            )
+            cv2.putText(frame, f"VIOLENCE #{id_a} vs #{id_b}", (30, 110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         for track_id, class_name, bbox in bags:
             centroid = bbox_center(bbox)
+            attended = any(
+                boxes_intersect_with_radius(bbox, person_bbox, BAGGAGE_PROXIMITY_RADIUS_PX)
+                for _, person_bbox in persons
+            )
             if track_id not in self.baggage_cache:
                 self.baggage_cache[track_id] = TrackedObject(
                     track_id=track_id, cls_name=class_name, bbox=bbox,
                     centroid=centroid, ref_centroid=centroid,
                 )
-            else:
-                obj = self.baggage_cache[track_id]
-                obj.bbox = bbox
-                obj.centroid = centroid
-                obj.last_seen = now
-                if dist(centroid, obj.ref_centroid) > BAGGAGE_STATIONARY_PIXEL_TOL:
-                    obj.ref_centroid = centroid
-                    obj.last_move_time = now
-
             obj = self.baggage_cache[track_id]
-            stationary_for = now - obj.last_move_time
-            if stationary_for > BAGGAGE_STATIONARY_SECONDS:
-                attended = any(
-                    boxes_intersect_with_radius(obj.bbox, person_bbox, BAGGAGE_PROXIMITY_RADIUS_PX)
-                    for _, person_bbox in persons
+            obj.bbox = bbox
+            obj.centroid = centroid
+            obj.last_seen = now
+            # Centroid drift beyond tolerance means the bag was picked up or
+            # nudged: restart the dwell clock.
+            if dist(centroid, obj.ref_centroid) > BAGGAGE_STATIONARY_PIXEL_TOL:
+                obj.ref_centroid = centroid
+                obj.last_move_time = now
+            if attended:
+                obj.last_attended_time = now
+
+            # Abandonment requires BOTH conditions to hold continuously:
+            # the bag has not moved, and no owner has come near it.
+            unattended_for = min(now - obj.last_move_time, now - obj.last_attended_time)
+            if unattended_for > BAGGAGE_STATIONARY_SECONDS:
+                self.emit(
+                    "UNATTENDED_BAGGAGE", frame,
+                    {"objectClass": obj.cls_name, "trackId": obj.track_id,
+                     "stationarySeconds": round(now - obj.last_move_time, 1),
+                     "unattendedSeconds": round(unattended_for, 1)},
+                    cache_key=f"bag_{track_id}",
                 )
-                if not attended:
-                    self.emit(
-                        "UNATTENDED_BAGGAGE", frame,
-                        {"objectClass": obj.cls_name, "trackId": obj.track_id,
-                         "stationarySeconds": round(stationary_for, 1)},
-                        cache_key=f"bag_{track_id}",
-                    )
-                    x1, y1, x2, y2 = obj.bbox
-                    cv2.putText(frame, f"UNATTENDED ({round(stationary_for)}s)", (x1, y2 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                x1, y1, x2, y2 = obj.bbox
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(frame, f"UNATTENDED ({round(unattended_for)}s)", (x1, y2 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
         for track_id in list(self.baggage_cache):
             if now - self.baggage_cache[track_id].last_seen > 5.0:
                 del self.baggage_cache[track_id]
+
+        # Identities are keyed by ByteTrack id; drop them when the track dies
+        # so a recycled id cannot inherit a stale watchlist name.
+        for track_id in list(self.identity_cache):
+            if track_id not in active_person_ids:
+                del self.identity_cache[track_id]
 
         if len(self.zone_polygon) >= 3:
             pixel_zone = [[x * self.cfg.width, y * self.cfg.height] for x, y in self.zone_polygon]
@@ -936,6 +1307,11 @@ def parse_args() -> EngineConfig:
     parser.add_argument("--conf", type=float, default=float(os.getenv("YOLO_CONF", "0.45")))
     parser.add_argument("--headless", action="store_true", help="Retained for compatibility; the engine is always headless")
     parser.add_argument("--mediamtx-rtsp", default=os.getenv("MEDIAMTX_RTSP_URL", "rtsp://127.0.0.1:8554"))
+    parser.add_argument("--weapon-model", default=os.getenv("WEAPON_MODEL", "yolov8n-weapons.pt"),
+                        help="Fine-tuned YOLO weights for weapons; skipped if the file is absent")
+    parser.add_argument("--weapon-conf", type=float, default=float(os.getenv("WEAPON_CONF", str(WEAPON_CONF_THRESHOLD))))
+    parser.add_argument("--crowd-threshold", type=int, default=int(os.getenv("CROWD_THRESHOLD", str(CROWD_PERSON_THRESHOLD))))
+    parser.add_argument("--crowd-frames", type=int, default=int(os.getenv("CROWD_FRAMES", str(CROWD_CONSENSUS_FRAMES))))
     args = parser.parse_args()
     return EngineConfig(
         rtsp_url=args.url or args.rtsp,
@@ -949,6 +1325,10 @@ def parse_args() -> EngineConfig:
         ffmpeg_bin=args.ffmpeg,
         conf=args.conf,
         mediamtx_rtsp_url=args.mediamtx_rtsp.rstrip("/"),
+        weapon_model=args.weapon_model,
+        weapon_conf=args.weapon_conf,
+        crowd_threshold=args.crowd_threshold,
+        crowd_frames=args.crowd_frames,
     )
 
 

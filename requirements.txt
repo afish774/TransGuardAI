@@ -1,0 +1,34 @@
+# ==========================================
+# TRANS GUARD AI - Edge Engine (Python)
+# Install:  pip install -r requirements.txt
+# Python 3.10 / 3.11 recommended (dlib + mediapipe wheels are best supported there)
+# ==========================================
+
+# --- Core vision + numerics ---
+# NOTE: keep numpy <2 -- mediapipe 0.10.x and the dlib wheels used by
+# face_recognition are built against the numpy 1.x ABI.
+numpy>=1.24,<2.0
+opencv-python>=4.8,<5.0
+requests>=2.31
+
+# --- Pillars 1, 2 & 4: YOLOv8 detection + ByteTrack persistence ---
+# ultralytics ships the ByteTrack tracker used via model.track(persist=True)
+# and pulls in torch/torchvision automatically.
+ultralytics>=8.1.0,<9.0
+lapx>=0.5.5          # required by ByteTrack for Hungarian assignment
+torch>=2.0
+torchvision>=0.15
+
+# --- Pillars 3 & 5: skeletal geometry + wrist velocity ---
+# HARD PIN: mediapipe removed the legacy `mp.solutions` API (Pose/Hands/
+# FaceMesh) in 0.10.30. The engine's PoseEngine imports
+# mediapipe.python.solutions.pose, which does NOT exist on >=0.10.30.
+# Do not relax this upper bound without migrating to the tasks API.
+mediapipe>=0.10.9,<=0.10.21
+
+# --- Pillar 6: biometric watchlist (128-D embeddings) ---
+# face_recognition needs dlib. On Linux/macOS dlib compiles from source and
+# requires cmake + a C++ toolchain; on Windows prefer a prebuilt dlib wheel.
+cmake>=3.25
+dlib>=19.24
+face_recognition>=1.3.0

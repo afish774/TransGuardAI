@@ -9,7 +9,11 @@ export const getEnrichedData = (alert) => {
     'CONGESTION': { severity: 'MEDIUM', label: 'CONGESTION' },
     'RESTRICTED_ZONE_INTRUSION': { severity: 'REVIEW', label: 'RESTRICTED ZONE INTRUSION' },
     'ZONE_INTRUSION': { severity: 'REVIEW', label: 'ZONE INTRUSION' },
-    'WATCHLIST_MATCH': { severity: 'CRITICAL', label: 'WATCHLIST MATCH' }
+    'WATCHLIST_MATCH': { severity: 'CRITICAL', label: 'WATCHLIST MATCH' },
+    'FALL_DETECTED': { severity: 'CRITICAL', label: 'FALL DETECTED' },
+    'CRIME_WEAPON_DETECTED': { severity: 'CRITICAL', label: 'WEAPON DETECTED' },
+    'CRIME_VIOLENCE_DETECTED': { severity: 'CRITICAL', label: 'VIOLENCE DETECTED' },
+    'OVERCROWD_DETECTED': { severity: 'HIGH', label: 'OVERCROWDING' }
   };
 
   const incidentObj = possibleIncidents[alert.incident_type] || { severity: 'HIGH', label: (alert.incident_type || 'UNKNOWN ALARM').replace(/_/g, ' ') };
