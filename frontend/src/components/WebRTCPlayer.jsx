@@ -41,7 +41,7 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
 
     try {
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: []
       });
       pcRef.current = pc;
 
