@@ -9,9 +9,9 @@ services:
     name: transguard-backend
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && cd frontend && npm install && npm run build
     startCommand: node server.js
-    healthCheckPath: /api/auth/login
+    healthCheckPath: /api/health
     envVars:
       - key: MONGO_URI
         sync: false  # Set manually in Render dashboard (use MongoDB Atlas free tier)
@@ -19,7 +19,11 @@ services:
         generateValue: true
       - key: DEFAULT_EDGE_API_KEY
         sync: false  # Set manually to match your .env.edge EDGE_API_KEY
+      - key: DEFAULT_ADMIN_PASSWORD
+        sync: false  # Set a strong admin password
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 5000
+      - key: CORS_ORIGINS
+        sync: false  # Set to your frontend domain, e.g. https://transguard.onrender.com

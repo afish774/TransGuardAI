@@ -29,6 +29,9 @@ mediapipe>=0.10.9,<=0.10.21
 # --- Pillar 6: biometric watchlist (128-D embeddings) ---
 # face_recognition needs dlib. On Linux/macOS dlib compiles from source and
 # requires cmake + a C++ toolchain; on Windows prefer a prebuilt dlib wheel.
+# setuptools is pinned <81 for pkg_resources compatibility required by face_recognition_models.
 cmake>=3.25
 dlib>=19.24
 face_recognition>=1.3.0
+setuptools<81
+

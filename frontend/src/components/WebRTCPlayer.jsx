@@ -167,16 +167,20 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
 
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
+            type="button"
             onClick={retryConnection}
             className="p-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
             title="Reconnect"
+            aria-label="Reconnect stream"
           >
             <RefreshCw size={12} className="text-white/80" />
           </button>
           <button
+            type="button"
             onClick={toggleFullscreen}
             className="p-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
             title="Fullscreen"
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
           >
             {isFullscreen
               ? <Minimize size={12} className="text-white/80" />

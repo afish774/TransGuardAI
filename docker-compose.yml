@@ -1,0 +1,115 @@
+# ==========================================
+# TRANS GUARD AI — Full Stack Docker Compose
+# ==========================================
+#
+# Profiles:
+#   default  → backend + mongo (dashboard only)
+#   full     → backend + mongo + engine (full pipeline)
+#
+# Usage:
+#   docker compose up -d                          # Dashboard only
+#   docker compose --profile full up -d           # Full stack with AI engine
+#   docker compose up -d --scale engine=3         # Multi-camera (3 engines)
+#
+# GPU support (engine):
+#   Requires NVIDIA Container Toolkit:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# ==========================================
+
+services:
+  # ----------------------------------------
+  # MongoDB — Incident & config database
+  # ----------------------------------------
+  mongo:
+    image: mongo:7
+    container_name: transguard-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand('ping').ok", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------
+  # Node.js Backend — API + Dashboard
+  # ----------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: transguard-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGO_URI=mongodb://mongo:27017/transguard
+      - JWT_SECRET=${JWT_SECRET:-transguard-jwt-change-me-in-production}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-TransGuard@2026!}
+      - DEFAULT_EDGE_API_KEY=${DEFAULT_EDGE_API_KEY:-transguard-edge-secret-key-9042}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    volumes:
+      - evidence_data:/app/uploads/evidence
+      - watchlist_data:/app/uploads/watchlist
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/api/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------
+  # Python Edge Engine — AI Detection
+  # ----------------------------------------
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    container_name: transguard-engine
+    restart: unless-stopped
+    profiles: ["full"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - RTSP_URL=${RTSP_URL:-rtsp://host.docker.internal:8554/cam0}
+      - BACKEND_URL=http://backend:5000
+      - EDGE_API_KEY=${EDGE_API_KEY:-transguard-edge-secret-key-9042}
+      - CAMERA_ID=${CAMERA_ID:-cam0}
+      - FRAME_WIDTH=${FRAME_WIDTH:-1280}
+      - FRAME_HEIGHT=${FRAME_HEIGHT:-720}
+      - FRAME_FPS=${FRAME_FPS:-25}
+      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
+      - YOLO_CONF=${YOLO_CONF:-0.45}
+      - WEAPON_MODEL=${WEAPON_MODEL:-yolov8n-weapons.pt}
+      - MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554
+    ports:
+      - "8554:8554"   # RTSP
+      - "8889:8889"   # WebRTC HTTP API
+      - "8888:8888"   # HLS
+    # Uncomment below for NVIDIA GPU acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  mongo_data:
+    driver: local
+  evidence_data:
+    driver: local
+  watchlist_data:
+    driver: local

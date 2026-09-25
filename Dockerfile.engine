@@ -1,0 +1,132 @@
+# ==========================================
+# TRANS GUARD AI — Edge Engine Dockerfile
+# ==========================================
+# Multi-stage build for the Python AI edge engine.
+#
+# Includes: YOLO, ByteTrack, MediaPipe Pose, face_recognition (dlib),
+#           FFmpeg for RTSP capture & re-publish, and MediaMTX for WebRTC/HLS.
+#
+# Build:
+#   docker build -f Dockerfile.engine -t transguard-engine .
+#
+# Run:
+#   docker run --gpus all \
+#     -e RTSP_URL=rtsp://your-camera:554/stream \
+#     -e BACKEND_URL=http://host.docker.internal:5000 \
+#     -e EDGE_API_KEY=your-api-key \
+#     -e CAMERA_ID=cam0 \
+#     -p 8554:8554 -p 8889:8889 \
+#     transguard-engine
+#
+# CPU-only (no --gpus):
+#   docker run \
+#     -e RTSP_URL=rtsp://your-camera:554/stream \
+#     -e BACKEND_URL=http://host.docker.internal:5000 \
+#     -e EDGE_API_KEY=your-api-key \
+#     -e CAMERA_ID=cam0 \
+#     -p 8554:8554 -p 8889:8889 \
+#     transguard-engine
+# ==========================================
+
+# ==========================================
+# STAGE 1: Builder — compile dlib + face_recognition
+# ==========================================
+FROM python:3.11-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    libopenblas-dev \
+    liblapack-dev \
+    libx11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Install Python deps into a virtualenv so we can copy it cleanly
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install requirements (dlib compiles from source here — takes ~5 min)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && \
+    pip install --no-cache-dir -r requirements.txt
+
+
+# ==========================================
+# STAGE 2: Runtime — lean image with FFmpeg + MediaMTX
+# ==========================================
+FROM python:3.11-slim-bookworm AS runtime
+
+# Install runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libopenblas0 \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MediaMTX (RTSP/WebRTC/HLS server)
+ARG MEDIAMTX_VERSION=v1.9.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then MTX_ARCH="linux_amd64"; \
+    elif [ "$ARCH" = "arm64" ]; then MTX_ARCH="linux_arm64v8"; \
+    else echo "Unsupported arch: $ARCH" && exit 1; fi && \
+    curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_${MTX_ARCH}.tar.gz" \
+    | tar xz -C /usr/local/bin mediamtx && \
+    chmod +x /usr/local/bin/mediamtx
+
+# Copy Python virtualenv from builder stage
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Copy engine code and model weights
+COPY engine/ ./engine/
+COPY trans_guard_engine.py .
+COPY requirements.txt .
+
+# Copy YOLO model weights (if present in build context)
+COPY yolov8n.pt* ./
+COPY yolov8n-weapons.pt* ./
+
+# Copy MediaPipe pose model (if present)
+COPY pose_landmarker_lite.task* ./
+
+# Copy the entrypoint script
+COPY docker/engine-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# ==========================================
+# DEFAULT ENVIRONMENT (overridable at run time)
+# ==========================================
+ENV RTSP_URL="rtsp://host.docker.internal:8554/cam0"
+ENV BACKEND_URL="http://host.docker.internal:5000"
+ENV EDGE_API_KEY="transguard-edge-secret-key-9042"
+ENV CAMERA_ID="cam0"
+ENV FRAME_WIDTH="1280"
+ENV FRAME_HEIGHT="720"
+ENV FRAME_FPS="25"
+ENV YOLO_MODEL="yolov8n.pt"
+ENV YOLO_CONF="0.45"
+ENV WEAPON_MODEL="yolov8n-weapons.pt"
+ENV MEDIAMTX_RTSP_URL="rtsp://127.0.0.1:8554"
+
+# Expose MediaMTX ports
+#   8554 = RTSP
+#   8889 = WebRTC (HTTP API)
+#   8888 = HLS
+EXPOSE 8554 8889 8888
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD pgrep -f "trans_guard_engine" > /dev/null || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,12 @@
+Write-Host "========================================="
+Write-Host " TransGuard AI - External Demo Tunneling"
+Write-Host "========================================="
+Write-Host "This script will expose your local React app, Node.js backend, and WebRTC stream to the public internet using Ngrok."
+Write-Host ""
+Write-Host "PREREQUISITES:"
+Write-Host "1. You must have a free Ngrok account."
+Write-Host "2. Install ngrok (e.g. choco install ngrok or download from ngrok.com)"
+Write-Host "3. Authenticate: ngrok config add-authtoken <YOUR_TOKEN>"
+Write-Host ""
+Write-Host "Starting multi-port tunnel..."
+ngrok start --all --config .\ngrok.yml

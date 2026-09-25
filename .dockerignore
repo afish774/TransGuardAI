@@ -1,0 +1,69 @@
+# ==========================================
+# TRANS GUARD AI — Docker Build Ignore
+# ==========================================
+
+# Git
+.git
+.gitignore
+
+# Dependencies (rebuilt inside container)
+node_modules
+*/node_modules
+transguard-env
+env
+venv
+.venv
+__pycache__
+*/__pycache__
+*.py[cod]
+
+# Frontend build output (rebuilt inside container)
+frontend/dist
+frontend/node_modules
+
+# Docker files (prevent recursive context)
+docker-compose.yml
+Dockerfile.*
+
+# Environment files with secrets
+.env
+.env.local
+.env.edge
+.env.*.local
+
+# IDE / OS files
+.vscode
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db
+
+# Logs & uploads (runtime data)
+*.log
+npm-debug.log*
+uploads/evidence/*
+uploads/watchlist/*
+
+# MediaMTX Windows binary
+mediamtx/mediamtx.exe
+mediamtx/*.exe
+*.exe
+
+# Documentation
+docs/
+*.md
+
+# Test files
+tests/
+*.test.js
+
+# Misc
+*.webp
+opencode.json
+ngrok.yml
+start_tunnels.ps1
+render.yaml

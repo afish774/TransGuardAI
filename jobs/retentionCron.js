@@ -2,53 +2,54 @@ const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
 const Incident = require('../models/Incident');
+const logger = require('../utils/logger').forComponent('Cron');
 
 const initRetentionCron = () => {
   // Schedule: Every night at midnight
-  cron.schedule('0 0 * * *', async () => {
-    console.log('[Cron] Starting retention purge for incidents older than 30 days...');
+  const task = cron.schedule('0 0 * * *', async () => {
+    logger.info('Starting retention purge for incidents older than 30 days...');
 
     try {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - 30);
 
-      // 1. Query MongoDB for all expired incidents
-      const oldIncidents = await Incident.find({ timestamp: { $lt: cutoffDate } });
+      // 1. Query MongoDB for expired incidents with lean projection
+      const oldIncidents = await Incident.find({ timestamp: { $lt: cutoffDate } })
+        .select('_id id evidence_image_url')
+        .lean();
 
       if (oldIncidents.length === 0) {
-        console.log('[Cron] No expired incidents found. Skipping.');
+        logger.info('No expired incidents found. Skipping.');
         return;
       }
 
-      // 2. Loop through and delete the physical .jpg files from disk
-      const idsToDelete = [];
+      // 2. Loop through and delete the physical evidence files from disk
       for (const incident of oldIncidents) {
-        idsToDelete.push(incident._id);
-
-        if (incident.evidence_image_url) {
+        if (incident.evidence_image_url && incident.evidence_image_url.includes('/uploads/evidence/')) {
           try {
-            const fileName = path.basename(incident.evidence_image_url);
+            const fileName = path.basename(incident.evidence_image_url.split('?')[0]);
             const filePath = path.join(__dirname, '..', 'uploads', 'evidence', fileName);
             await fs.unlink(filePath);
           } catch (err) {
             // File may already be gone — log and continue
             if (err.code !== 'ENOENT') {
-              console.error(`[Cron] Failed to delete file for ${incident.id}:`, err.message);
+              logger.error('Failed to delete file for %s: %s', incident.id, err.message);
             }
           }
         }
       }
 
-      // 3. Bulk delete all expired records from MongoDB in one operation
-      const result = await Incident.deleteMany({ _id: { $in: idsToDelete } });
+      // 3. Bulk delete all expired records from MongoDB directly by index
+      const result = await Incident.deleteMany({ timestamp: { $lt: cutoffDate } });
 
-      console.log(`[Cron] Retention purge complete. Deleted ${result.deletedCount} records and their evidence files.`);
+      logger.info('Retention purge complete. Deleted %d records and their evidence files.', result.deletedCount);
     } catch (error) {
-      console.error('[Cron] Error during retention purge:', error);
+      logger.error('Error during retention purge: %s', error.message);
     }
   });
 
-  console.log('[Cron] Retention job initialized (runs daily at midnight).');
+  logger.info('Retention job initialized (runs daily at midnight).');
+  return task;
 };
 
 module.exports = initRetentionCron;

@@ -52,5 +52,9 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+opencode.json
+
+# Test coverage output
+coverage/
 
 *.webp

@@ -15,5 +15,12 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './src/test-setup.js',
+    css: false, // Skip CSS processing in tests for speed
+  },
 })
+
 
