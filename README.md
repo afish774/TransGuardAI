@@ -23,7 +23,7 @@ The system processes live RTSP camera feeds through six independent AI detection
 
 ### Technical Documentation
 - **[Mobile Camera RTSP Demo & Transit Testing Guide](docs/MOBILE_DEMO_GUIDE.md)** — Simple English step-by-step instructions for running the complete 6-pillar surveillance demo using a smartphone camera (no physical hardware required).
-- **[Master Architecture & Project State Manual](docs/PROJECT_ARCHITECTURE_AND_STATE.md)** — Complete architectural specification, security models, test matrix, and historical evolution (7.5 to 10/10) for AI models (Claude) and engineers.
+- **[Master Architecture & Project State Manual](docs/PROJECT_ARCHITECTURE_AND_STATE.md)** — Complete architectural specification, security models, test matrix, and historical evolution (7.5 to 10/10) for AI models and engineers.
 - **[System Block Diagrams & Circuit Schematics](docs/DIAGRAMS.md)** — Complete software/hardware block diagrams, sequence flowcharts, and electronic circuit schematics with Bill of Materials.
 - **[Computer Vision Mathematical Architecture](docs/TECHNICAL_ARCHITECTURE.md)** — Mathematical formulations, skeletal geometry, and temporal confirmation algorithms for the 6 edge detection pillars.
 
