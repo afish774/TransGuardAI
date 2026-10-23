@@ -184,7 +184,7 @@ python trans_guard_engine.py --camera cam0 --url rtsp://your-camera:554/stream
 # Run all tests (Python + Backend)
 npm test
 
-# Python AI engine tests only (22 tests)
+# Python AI engine tests only (42 tests)
 npm run test:python
 
 # Backend API integration tests only (Jest + Supertest)
@@ -198,7 +198,7 @@ cd frontend && npm test
 
 | Layer | Framework | Tests | Coverage |
 |:------|:----------|------:|:---------|
-| AI Engine | Python `unittest` | 22 | Geometry, crowd detection, fall detection, violence detection |
+| AI Engine | Python `unittest` | 42 | Geometry, crowd detection, fall detection, violence detection, resolution scaling, adversarial negatives |
 | Backend API | Jest + Supertest | 20 | Auth, alerts, edge routes, health, RBAC, validation |
 | Frontend UI | Vitest + RTL | 10+ | ErrorBoundary, Skeleton, ToastProvider, LoginView |
 
@@ -264,7 +264,7 @@ transguard-ai/
 ├── utils/
 │   └── logger.js              # Winston structured logging
 ├── tests/
-│   ├── test_fusion_detectors.py  # Python AI unit tests (22 tests)
+│   ├── test_fusion_detectors.py  # Python AI unit tests (42 tests)
 │   └── backend/                  # Jest API integration tests
 ├── docker/
 │   └── engine-entrypoint.sh   # Engine process supervisor

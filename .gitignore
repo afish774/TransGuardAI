@@ -29,9 +29,12 @@ build/
 mediamtx/mediamtx.exe
 mediamtx/*.exe
 
-# AI Weights & Task Models (Large files)
+# AI Weights & Task Models
 *.pt
 *.task
+!yolov8n.pt
+!yolov8n-weapons.pt
+!pose_landmarker_lite.task
 
 # Runtime Uploads & Logs
 uploads/evidence/*

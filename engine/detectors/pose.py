@@ -51,11 +51,17 @@ class PoseEngine:
                 min_tracking_confidence=0.5,
             )
             self._pose_landmark = mp_pose.PoseLandmark
-        self.fall_streaks: Dict[int, int] = {}
+        self.fall_streaks: Dict[int, float] = {}
         # Centroid trajectory history: track_id -> (centroid, timestamp)
         self._prev_centroid: Dict[int, Tuple[Tuple[float, float], float]] = {}
         # Track whether we saw a velocity spike recently: track_id -> True
         self._velocity_spike: Dict[int, bool] = {}
+        # Resolution scale factor (1.0 = 720p reference)
+        self._scale: float = 1.0
+
+    def calibrate(self, frame_h: int, ref_h: int = 720) -> None:
+        """Set resolution scale factor for pixel-based thresholds."""
+        self._scale = frame_h / ref_h
 
     @property
     def available(self) -> bool:
@@ -167,7 +173,9 @@ class PoseEngine:
 
         # ---- Signal 3: Rapid downward centroid velocity ----
         total_speed, vy = self._centroid_velocity(track_id, bbox, ts)
-        if vy > _FALL_VELOCITY_PX_S:
+        scaled_fall_vel = _FALL_VELOCITY_PX_S * self._scale
+        scaled_still = _STILL_PX_S * self._scale
+        if vy > scaled_fall_vel:
             self._velocity_spike[track_id] = True
 
         had_velocity_spike = self._velocity_spike.get(track_id, False)
@@ -179,14 +187,19 @@ class PoseEngine:
         #   - recent velocity spike (active falling phase)
         #   - no skeleton available (fallback to geometry only)
         skeleton_signal = head_below_hips or torso_horizontal or had_velocity_spike
-        fallen = horizontal and (skeleton_signal or not self.available)
+        fall_posture = horizontal and (skeleton_signal or not self.available)
 
-        # Floor stillness: once fallen, require low speed to confirm
-        if fallen and total_speed > _STILL_PX_S * 3:
-            # Still moving fast – probably not a fall, could be rolling or getting up
-            fallen = False
+        # Determine streak increment based on post-fall movement
+        if fall_posture:
+            if total_speed > scaled_still * 3:
+                # High post-fall movement: possible seizure/convulsion/medical emergency
+                # Build streak at reduced rate instead of hard suppression
+                streak = self.fall_streaks.get(track_id, 0) + 0.3
+            else:
+                streak = self.fall_streaks.get(track_id, 0) + 1.0
+        else:
+            streak = 0.0
 
-        streak = self.fall_streaks.get(track_id, 0) + 1 if fallen else 0
         self.fall_streaks[track_id] = streak
         if streak >= FALL_CONFIRM_FRAMES:
             self.fall_streaks[track_id] = 0
@@ -194,7 +207,7 @@ class PoseEngine:
             return True
 
         # Decay velocity spike if not reinforced
-        if not fallen and track_id in self._velocity_spike:
+        if not fall_posture and track_id in self._velocity_spike:
             del self._velocity_spike[track_id]
 
         return False

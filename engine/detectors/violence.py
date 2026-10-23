@@ -9,6 +9,10 @@ Accuracy upgrades over the previous version:
      involves rapid convergence; parallel walking does not.
   3. Oscillation Counter – counts rapid direction changes in wrist
      movement (up-down-up striking pattern) rather than raw speed.
+  4. FPS-adaptive EMA – uses a time-constant (tau) instead of a fixed
+     alpha, so the EMA behaves consistently across different frame rates.
+  5. Resolution-adaptive thresholds – pixel-based thresholds are scaled
+     to the actual frame height via calibrate().
 """
 
 import time
@@ -25,11 +29,11 @@ from engine.config import (
 from engine.utils.geometry import dist, bbox_iou, bbox_center
 
 
-# EMA smoothing factor for kinetic energy (0..1, lower = smoother)
-_KINETIC_EMA_ALPHA = 0.35
-# Minimum mutual convergence speed (px/s) to count as "approaching"
+# EMA time constant in seconds (replaces fixed alpha for FPS independence)
+_KINETIC_EMA_TAU_S = 0.10
+# Minimum mutual convergence speed (px/s at 720p) to count as "approaching"
 _CONVERGENCE_PX_S = 50.0
-# Wrist direction-change threshold to count as "oscillation"
+# Wrist direction-change threshold (px/s at 720p) to count as "oscillation"
 _OSCILLATION_SPEED_THRESHOLD = 150.0
 
 
@@ -45,6 +49,12 @@ class ViolenceDetector:
         self._prev_wrist_vy: Dict[int, float] = {}
         # Oscillation counter per track
         self._oscillation_count: Dict[int, int] = {}
+        # Resolution scale factor (1.0 = 720p reference)
+        self._scale: float = 1.0
+
+    def calibrate(self, frame_h: int, ref_h: int = 720) -> None:
+        """Set resolution scale factor for pixel-based thresholds."""
+        self._scale = frame_h / ref_h
 
     @staticmethod
     def _wrists(points) -> Dict[str, Tuple[float, float]]:
@@ -82,10 +92,11 @@ class ViolenceDetector:
 
         peak = max(speeds)
 
-        # Update kinetic EMA
+        # Update kinetic EMA with FPS-adaptive alpha
+        alpha = 1.0 - math.exp(-elapsed / _KINETIC_EMA_TAU_S) if elapsed > 1e-6 else 0.0
         prev_ema = self._kinetic_ema.get(track_id, 0.0)
         self._kinetic_ema[track_id] = (
-            _KINETIC_EMA_ALPHA * peak + (1 - _KINETIC_EMA_ALPHA) * prev_ema
+            alpha * peak + (1 - alpha) * prev_ema
         )
 
         # Track oscillation (direction changes in wrist movement)
@@ -96,7 +107,7 @@ class ViolenceDetector:
             # Direction reversal with significant speed
             if (
                 prev_vy * avg_vy < 0  # sign change
-                and abs(avg_vy) > _OSCILLATION_SPEED_THRESHOLD
+                and abs(avg_vy) > _OSCILLATION_SPEED_THRESHOLD * self._scale
             ):
                 self._oscillation_count[track_id] = (
                     self._oscillation_count.get(track_id, 0) + 1
@@ -174,14 +185,16 @@ class ViolenceDetector:
                 #   1. Sustained high kinetic EMA (not just a spike) with overlap
                 #   2. High instantaneous speed + mutual convergence
                 #   3. Oscillating wrist motion (repeated striking) with overlap
+                scaled_wrist = VIOLENCE_WRIST_SPEED_PX_S * self._scale
+                scaled_conv = _CONVERGENCE_PX_S * self._scale
                 is_violent_frame = False
-                if peak_ema >= VIOLENCE_WRIST_SPEED_PX_S * 0.7:
+                if peak_ema >= scaled_wrist * 0.7:
                     # Sustained high energy
                     is_violent_frame = True
-                elif peak >= VIOLENCE_WRIST_SPEED_PX_S and conv > _CONVERGENCE_PX_S:
+                elif peak >= scaled_wrist and conv > scaled_conv:
                     # Fast wrists + approaching each other
                     is_violent_frame = True
-                elif max_osc >= 3 and peak_ema >= VIOLENCE_WRIST_SPEED_PX_S * 0.4:
+                elif max_osc >= 3 and peak_ema >= scaled_wrist * 0.4:
                     # Oscillating striking pattern
                     is_violent_frame = True
 

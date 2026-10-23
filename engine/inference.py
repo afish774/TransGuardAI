@@ -67,6 +67,7 @@ class IncidentProcessor:
         self._recent_violence: Dict[Tuple[int, int], float] = {}  # (id_a, id_b) -> timestamp
         self._recent_weapons: Dict[int, float] = {}  # track_id -> timestamp
         self._recent_falls: Dict[int, float] = {}  # track_id -> timestamp
+        self._calibrated: bool = False
 
     def close(self) -> None:
         self.pose.close()
@@ -156,6 +157,18 @@ class IncidentProcessor:
 
     def process_frame(self, frame: np.ndarray) -> None:
         now = time.time()
+
+        # Calibrate pixel thresholds to actual resolution on first frame
+        if not self._calibrated:
+            frame_h = frame.shape[0]
+            self.pose.calibrate(frame_h)
+            self.violence.calibrate(frame_h)
+            self.baggage.calibrate(frame_h)
+            self.weapons._scale = frame_h / 720.0
+            self._calibrated = True
+            log.info("Detectors calibrated for %dx%d (scale=%.2f)",
+                     frame.shape[1], frame_h, frame_h / 720.0)
+
         results = self.model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=self.cfg.conf)[0]
         persons: List[Tuple[int, Tuple[int, int, int, int]]] = []
         bags: List[Tuple[int, str, Tuple[int, int, int, int]]] = []

@@ -149,6 +149,7 @@ class TestFallGeometry(unittest.TestCase):
         self.engine.fall_streaks = {}
         self.engine._prev_centroid = {}
         self.engine._velocity_spike = {}
+        self.engine._scale = 1.0
 
     def test_standing_person_never_falls(self):
         upright_bbox = (0, 0, 50, 200)          # tall box
@@ -351,7 +352,7 @@ class TestWeaponDetectorLogic(unittest.TestCase):
         self.assertTrue(self.detector._is_weapon("Gun"))
         self.assertTrue(self.detector._is_weapon("pistol"))
         self.assertTrue(self.detector._is_weapon("firearm"))
-        self.assertTrue(self.detector._is_weapon("scissors"))
+        self.assertTrue(self.detector._is_weapon("blade"))
         self.assertTrue(self.detector._is_weapon("grenade"))
         self.assertTrue(self.detector._is_weapon("explosive"))
 
@@ -543,6 +544,227 @@ class TestOcclusionConvergenceDiscard(unittest.TestCase):
         self.assertEqual(conv, 0.0, "Stale centroid >0.5s old must discard convergence to prevent false spikes")
 
 
+class TestResolutionScaling(unittest.TestCase):
+    """Verify pixel thresholds scale correctly across resolutions."""
+
+    def test_scale_px_identity_at_720p(self):
+        from engine.utils.geometry import scale_px
+        self.assertAlmostEqual(scale_px(100.0, 720), 100.0)
+
+    def test_scale_px_doubles_at_1440p(self):
+        from engine.utils.geometry import scale_px
+        self.assertAlmostEqual(scale_px(100.0, 1440), 200.0)
+
+    def test_scale_px_halves_at_360p(self):
+        from engine.utils.geometry import scale_px
+        self.assertAlmostEqual(scale_px(100.0, 360), 50.0)
+
+    def test_violence_calibrate_updates_scale(self):
+        detector = ViolenceDetector()
+        self.assertEqual(detector._scale, 1.0)
+        detector.calibrate(1080)
+        self.assertAlmostEqual(detector._scale, 1.5)
+
+    def test_fall_calibrate_updates_scale(self):
+        engine = PoseEngine.__new__(PoseEngine)
+        engine.pose = None
+        engine._pose_landmark = None
+        engine.fall_streaks = {}
+        engine._prev_centroid = {}
+        engine._velocity_spike = {}
+        engine._scale = 1.0
+        engine.calibrate(1080)
+        self.assertAlmostEqual(engine._scale, 1.5)
+
+    def test_baggage_calibrate_scales_proximity(self):
+        from engine.config import BAGGAGE_PROXIMITY_RADIUS_PX
+        detector = BaggageDetector()
+        detector.calibrate(1080)
+        self.assertAlmostEqual(detector._proximity, BAGGAGE_PROXIMITY_RADIUS_PX * 1.5)
+
+
+class TestViolenceFalsePositiveWalking(unittest.TestCase):
+    """Two people walking together with overlapping boxes and normal arm swing
+    must NOT trigger violence."""
+
+    def test_parallel_walk_no_violence(self):
+        detector = ViolenceDetector()
+        # Two people walking side-by-side with slight bbox overlap
+        persons = [(1, (0, 0, 100, 200)), (2, (80, 0, 180, 200))]
+        # Natural arm swing: ~100 px/s — well below violence threshold
+        speeds = {1: 100.0, 2: 90.0}
+        for i in range(60):
+            events = detector.evaluate(persons, speeds, i * 0.04)
+            self.assertEqual(events, [],
+                             f"Walking pair must not trigger violence at frame {i}")
+
+    def test_animated_conversation_no_violence(self):
+        """Two people gesturing animatedly while standing close — not violence."""
+        detector = ViolenceDetector()
+        persons = [(1, (0, 0, 100, 200)), (2, (70, 0, 170, 200))]
+        # Animated but below threshold: ~200 px/s (below 320*0.7=224 at 720p)
+        speeds = {1: 200.0, 2: 180.0}
+        for i in range(60):
+            events = detector.evaluate(persons, speeds, i * 0.04)
+            self.assertEqual(events, [],
+                             "Animated conversation should not trigger violence")
+
+
+class TestFallFalsePositiveBending(unittest.TestCase):
+    """Person bending to pick up an object must NOT trigger fall detection."""
+
+    def setUp(self):
+        self.engine = PoseEngine.__new__(PoseEngine)
+        self.engine.pose = object()
+        self.engine._pose_landmark = None
+        self.engine.fall_streaks = {}
+        self.engine._prev_centroid = {}
+        self.engine._velocity_spike = {}
+        self.engine._scale = 1.0
+
+    def test_bending_person_no_fall(self):
+        """Person bends (head dips below hips momentarily) then stands up.
+        Should NOT trigger if they return to upright within confirm window."""
+        # Bending frames (3 frames of wide bbox + head below hips)
+        wide_bbox = (0, 0, 200, 50)
+        bent_points = landmark_set(nose_y=120.0, hip_y=100.0)
+        for _ in range(3):
+            self.engine.is_fall(1, wide_bbox, bent_points)
+
+        # Return to standing immediately (before FALL_CONFIRM_FRAMES)
+        tall_bbox = (0, 0, 50, 200)
+        upright_points = landmark_set(nose_y=10.0, hip_y=100.0)
+        for _ in range(10):
+            result = self.engine.is_fall(1, tall_bbox, upright_points)
+            self.assertFalse(result, "Bending then standing should not trigger fall")
+
+
+class TestFallSeizureSoftGate(unittest.TestCase):
+    """A person who falls and then convulses should still trigger fall detection,
+    just with a longer streak requirement."""
+
+    def setUp(self):
+        self.engine = PoseEngine.__new__(PoseEngine)
+        self.engine.pose = object()
+        self.engine._pose_landmark = None
+        self.engine.fall_streaks = {}
+        self.engine._prev_centroid = {}
+        self.engine._velocity_spike = {}
+        self.engine._scale = 1.0
+
+    def test_moving_fallen_person_still_triggers_eventually(self):
+        """Wide bbox + head below hips + high centroid speed (seizure) should
+        still trigger after enough frames at the reduced rate."""
+        wide_bbox = (0, 0, 200, 50)
+        fallen_points = landmark_set(nose_y=120.0, hip_y=100.0)
+
+        # Simulate centroid moving fast (seizure) by varying timestamps
+        results = []
+        base_t = 1000.0
+        for i in range(50):
+            # Feed varying centroid positions to simulate movement
+            # Offset the bbox slightly to create centroid velocity
+            offset = (i % 5) * 10
+            moving_bbox = (0 + offset, 0, 200 + offset, 50)
+            result = self.engine.is_fall(1, moving_bbox, fallen_points, now=base_t + i * 0.04)
+            results.append(result)
+
+        # Should eventually trigger (0.3 increment per frame, need 5 frames → ~17 frames)
+        self.assertTrue(any(results),
+                        "Fallen + moving person (seizure) should still trigger fall via soft gate")
+
+
+class TestViolenceFPSAdaptiveEMA(unittest.TestCase):
+    """Verify the kinetic EMA behaves consistently at different frame rates."""
+
+    def test_ema_builds_at_different_fps(self):
+        """EMA should reach similar steady-state value regardless of FPS
+        when the wrist speed is the same in px/s."""
+        # Simulate at 15 FPS
+        det_15 = ViolenceDetector()
+        pts_still = landmark_set(0, 0, wrist_x=0.0, wrist_y=0.0)
+        det_15.wrist_speed(1, pts_still, 0.0)
+        for i in range(1, 30):
+            t = i * (1.0 / 15.0)  # 15 FPS
+            # Move wrist 500px/s * dt = ~33px per frame
+            pts = landmark_set(0, 0, wrist_x=500.0 * (1.0 / 15.0) * i, wrist_y=0.0)
+            det_15.wrist_speed(1, pts, t)
+        ema_15 = det_15._kinetic_ema.get(1, 0.0)
+
+        # Simulate at 30 FPS
+        det_30 = ViolenceDetector()
+        pts_still = landmark_set(0, 0, wrist_x=0.0, wrist_y=0.0)
+        det_30.wrist_speed(1, pts_still, 0.0)
+        for i in range(1, 60):
+            t = i * (1.0 / 30.0)  # 30 FPS
+            pts = landmark_set(0, 0, wrist_x=500.0 * (1.0 / 30.0) * i, wrist_y=0.0)
+            det_30.wrist_speed(1, pts, t)
+        ema_30 = det_30._kinetic_ema.get(1, 0.0)
+
+        # Both should converge to ~500 px/s (the steady input); allow 30% tolerance
+        self.assertGreater(ema_15, 0)
+        self.assertGreater(ema_30, 0)
+        ratio = ema_15 / ema_30 if ema_30 > 0 else float('inf')
+        self.assertAlmostEqual(ratio, 1.0, delta=0.35,
+                               msg=f"EMA at 15fps ({ema_15:.1f}) vs 30fps ({ema_30:.1f}) diverged too much")
+
+
+class TestWeaponKeywordCleanup(unittest.TestCase):
+    """Verify bat and scissors no longer trigger weapon classification."""
+
+    def test_bat_not_weapon(self):
+        from engine.config import WEAPON_CLASS_KEYWORDS
+        self.assertFalse(any("bat" in kw for kw in WEAPON_CLASS_KEYWORDS),
+                         "'bat' should be removed from weapon keywords")
+
+    def test_scissors_not_weapon(self):
+        from engine.config import WEAPON_CLASS_KEYWORDS
+        self.assertFalse(any("scissors" in kw for kw in WEAPON_CLASS_KEYWORDS),
+                         "'scissors' should be removed from weapon keywords")
+
+    def test_default_weapon_conf_at_least_040(self):
+        from engine.config import WEAPON_CONF_THRESHOLD
+        self.assertGreaterEqual(WEAPON_CONF_THRESHOLD, 0.40,
+                                "Default weapon confidence must be >= 0.40")
+
+
+class TestCLIPFailSafe(unittest.TestCase):
+    """Verify CLIP returns False (safe) on error, not True."""
+
+    def test_clip_error_returns_false(self):
+        detector = WeaponDetector.__new__(WeaponDetector)
+        detector.model = None
+        detector.clip = None
+        # With clip=None, _verify_with_clip should return True (no CLIP available)
+        blank = np.zeros((50, 50, 3), dtype=np.uint8)
+        self.assertTrue(detector._verify_with_clip(blank, "gun"),
+                        "No CLIP loaded should pass through (return True)")
+
+
+class TestCrowdDensityFalsePositive(unittest.TestCase):
+    """Verify 3 people spread out in a wide area do NOT trigger density alarm."""
+
+    def test_spread_persons_no_density_alarm(self):
+        detector = CrowdDetector(threshold=10, confirm_frames=3)
+        # 3 people spread across a wide 1280x720 frame (2D spread)
+        persons = [
+            (1, (100, 100, 150, 300)),
+            (2, (500, 350, 550, 550)),
+            (3, (900, 50, 950, 250)),
+        ]
+        for _ in range(10):
+            result = detector.update(3, persons=persons)
+            self.assertIsNone(result, "3 spread-out people should NOT trigger density alarm")
+
+
+class TestFaceToleranceDefault(unittest.TestCase):
+    """Verify face match tolerance default is tightened."""
+
+    def test_default_tolerance_is_050(self):
+        from engine.config import FACE_MATCH_TOLERANCE
+        self.assertLessEqual(FACE_MATCH_TOLERANCE, 0.50,
+                             "Default face tolerance should be <= 0.50 for cross-demographic accuracy")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

@@ -75,6 +75,16 @@ class BaggageDetector:
 
     def __init__(self):
         self.cache: Dict[int, TrackedBag] = {}
+        # Resolution-scaled thresholds (default = 720p reference values)
+        self._scale: float = 1.0
+        self._proximity: float = BAGGAGE_PROXIMITY_RADIUS_PX
+        self._stationary_tol: float = BAGGAGE_STATIONARY_PIXEL_TOL
+
+    def calibrate(self, frame_h: int, ref_h: int = 720) -> None:
+        """Set resolution scale factor for pixel-based thresholds."""
+        self._scale = frame_h / ref_h
+        self._proximity = BAGGAGE_PROXIMITY_RADIUS_PX * self._scale
+        self._stationary_tol = BAGGAGE_STATIONARY_PIXEL_TOL * self._scale
 
     def update(
         self,
@@ -111,7 +121,7 @@ class BaggageDetector:
             bag.last_seen = now
 
             # Has the bag moved?
-            if dist(centroid, bag.ref_centroid) > BAGGAGE_STATIONARY_PIXEL_TOL:
+            if dist(centroid, bag.ref_centroid) > self._stationary_tol:
                 bag.ref_centroid = centroid
                 bag.last_move_time = now
 
@@ -121,7 +131,7 @@ class BaggageDetector:
                 for pid, pbbox in persons:
                     if pid == bag.owner_id:
                         if boxes_intersect_with_radius(
-                            bbox, pbbox, BAGGAGE_PROXIMITY_RADIUS_PX
+                            bbox, pbbox, self._proximity
                         ):
                             owner_near = True
                             bag.owner_last_near_time = now
@@ -130,7 +140,7 @@ class BaggageDetector:
                 # No assigned owner – fall back to "any person nearby"
                 for _, pbbox in persons:
                     if boxes_intersect_with_radius(
-                        bbox, pbbox, BAGGAGE_PROXIMITY_RADIUS_PX
+                        bbox, pbbox, self._proximity
                     ):
                         owner_near = True
                         bag.owner_last_near_time = now
@@ -158,8 +168,8 @@ class BaggageDetector:
 
         return alerts
 
-    @staticmethod
     def _find_nearest_person(
+        self,
         bag_bbox: Tuple[int, int, int, int],
         persons: List[Tuple[int, Tuple[int, int, int, int]]],
     ) -> Optional[int]:
@@ -169,7 +179,7 @@ class BaggageDetector:
         best_dist = float("inf")
         for pid, pbbox in persons:
             if not boxes_intersect_with_radius(
-                bag_bbox, pbbox, BAGGAGE_PROXIMITY_RADIUS_PX
+                bag_bbox, pbbox, self._proximity
             ):
                 continue
             d = dist(bag_center, bbox_center(pbbox))

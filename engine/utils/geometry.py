@@ -84,3 +84,13 @@ def extract_face_box_from_landmarks(
     if bottom - top < 25 or right - left < 25:
         return None
     return (top, right, bottom, left)
+
+
+def scale_px(value_at_720p: float, frame_h: int, ref_h: int = 720) -> float:
+    """Scale a pixel threshold calibrated at ref_h to the actual frame height.
+
+    All pixel-based thresholds in the detection engine were tuned for 720p
+    (1280×720).  This helper linearly scales them so the system behaves
+    consistently at other resolutions (e.g. 480p, 1080p, 4K).
+    """
+    return value_at_720p * (frame_h / ref_h)

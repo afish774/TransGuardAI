@@ -25,13 +25,21 @@ log = logging.getLogger("trans-guard-engine")
 # Minimum confidence per class to avoid false positives (overrides default)
 CLASS_THRESHOLDS = {
     "grenade": 0.65,
+    "explosive": 0.60,
+    "explosion": 0.60,
     "gun": 0.50,
     "pistol": 0.50,
     "handgun": 0.50,
     "firearm": 0.50,
+    "revolver": 0.50,
+    "rifle": 0.50,
+    "weapon": 0.50,
     "knife": 0.45,
-    "explosion": 0.50
+    "blade": 0.45,
 }
+
+# Run full-frame weapon scan every N calls (not every frame) to save compute
+_FULL_FRAME_INTERVAL = 5
 
 class WeaponDetector:
     def __init__(self, weights_path: str, conf: float = WEAPON_CONF_THRESHOLD):
@@ -39,6 +47,8 @@ class WeaponDetector:
         self.conf = conf
         self.names: Dict[int, str] = {}
         self.streaks: Dict[int, int] = {}
+        self._scan_count: int = 0
+        self._scale: float = 1.0
         if not weights_path:
             return
         if YOLO is None:
@@ -103,7 +113,7 @@ class WeaponDetector:
             return False
         except Exception as e:
             log.debug("CLIP verification error: %s", e)
-            return True
+            return False  # fail-safe: do not confirm weapon on CLIP error
 
     def scan(
         self,
@@ -128,7 +138,7 @@ class WeaponDetector:
                             lm = pts.get(wrist_name)
                             if lm and lm[2] >= 0.30:
                                 wx, wy = int(lm[0]), int(lm[1])
-                                r = 150
+                                r = int(150 * self._scale)
                                 x1 = max(0, wx - r)
                                 y1 = max(0, wy - r)
                                 x2 = min(frame.shape[1], wx + r)
@@ -203,7 +213,8 @@ class WeaponDetector:
             if streak >= WEAPON_CONFIRM_FRAMES:
                 hits.append((track_id, best[0], best[1], best[2]))
 
-        if not hits and persons:
+        self._scan_count += 1
+        if not hits and persons and self._scan_count % _FULL_FRAME_INTERVAL == 0:
             try:
                 full_res = self.model.predict(frame, conf=self.conf, verbose=False)[0]
                 if full_res.boxes is not None:

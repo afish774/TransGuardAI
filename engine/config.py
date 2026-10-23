@@ -30,9 +30,9 @@ FALL_ASPECT_RATIO = 1.0
 
 # --- Pillar 4: weapon detection ---
 WEAPON_CLASS_KEYWORDS = ("gun", "pistol", "handgun", "revolver", "rifle",
-                         "weapon", "knife", "blade", "bat", "firearm", "scissors",
+                         "weapon", "knife", "blade", "firearm",
                          "grenade", "explosive", "explosion")
-WEAPON_CONF_THRESHOLD = float(os.getenv("WEAPON_CONF", "0.20"))
+WEAPON_CONF_THRESHOLD = float(os.getenv("WEAPON_CONF", "0.40"))
 WEAPON_CONFIRM_FRAMES = 5
 WEAPON_CROP_PADDING = 0.30
 WEAPON_MAX_CROPS_PER_FRAME = 6
@@ -44,7 +44,7 @@ VIOLENCE_CONFIRM_FRAMES = 6
 VIOLENCE_PAIR_TTL_S = 3.0
 
 # --- Pillar 6: biometric watchlist ---
-FACE_MATCH_TOLERANCE = float(os.getenv("FACE_MATCH_TOLERANCE", "0.60"))
+FACE_MATCH_TOLERANCE = float(os.getenv("FACE_MATCH_TOLERANCE", "0.50"))
 FACE_RESCAN_INTERVAL_S = 1.0
 FACE_MIN_SIZE = 120
 
