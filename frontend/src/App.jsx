@@ -49,6 +49,27 @@ function AppContent() {
 
   const alertBuffer = useRef([]);
 
+  const fetchCameras = useCallback(async () => {
+    if (!token) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/edge/cameras`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          setActiveCameras(data);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch camera list:', err);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    fetchCameras();
+  }, [fetchCameras]);
+
   useEffect(() => {
     if (!token) return; // Wait for login
 
@@ -235,7 +256,7 @@ function AppContent() {
       ) : activeTab === 'Watchlist Queue' ? (
         <WatchlistView token={token} />
       ) : activeTab === 'Camera Nodes' ? (
-        <CameraNodesView activeCameras={activeCameras} token={token} />
+        <CameraNodesView activeCameras={activeCameras} token={token} onRefreshCameras={fetchCameras} />
       ) : activeTab === 'Insights' ? (
         <InsightsView alerts={alerts} activeCameras={activeCameras} />
       ) : activeTab === 'My team' ? (

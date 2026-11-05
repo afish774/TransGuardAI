@@ -19,6 +19,7 @@ class MediaMTXPublisher:
 
     def start(self) -> None:
         self.stop()
+        gop_size = max(1, int(self.cfg.fps))
         command = [
             self.cfg.ffmpeg_bin,
             "-hide_banner",
@@ -31,6 +32,9 @@ class MediaMTXPublisher:
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
+            "-g", str(gop_size),
+            "-keyint_min", str(gop_size),
+            "-sc_threshold", "0",
             "-pix_fmt", "yuv420p",
             "-f", "rtsp",
             "-rtsp_transport", "tcp",

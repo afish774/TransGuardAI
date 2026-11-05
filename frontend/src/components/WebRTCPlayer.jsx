@@ -1,8 +1,8 @@
-import React, { useRef, useEffect, useState, memo } from 'react';
+import React, { useRef, useEffect, useState, memo, useCallback } from 'react';
 import { Video, WifiOff, Maximize, Minimize, RefreshCw } from 'lucide-react';
 
 /**
- * WebRTCPlayer — connects to a MediaMTX WebRTC endpoint for a single camera.
+ * WebRTCPlayer — connects to a MediaMTX WebRTC (WHEP) endpoint for a single camera.
  * Falls back to HLS <video> if WebRTC negotiation fails.
  *
  * Props:
@@ -12,65 +12,137 @@ import { Video, WifiOff, Maximize, Minimize, RefreshCw } from 'lucide-react';
  *   - mediamtxUrl: string (e.g. "http://localhost:8889")
  *   - mediamtxHlsUrl: string (e.g. "http://localhost:8888")
  */
-const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl }) => {
+const WebRTCPlayer = memo(({ cameraId, status, fps = 0, mediamtxUrl, mediamtxHlsUrl }) => {
   const videoRef = useRef(null);
   const pcRef = useRef(null);
+  const containerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
   const [mode, setMode] = useState('webrtc'); // 'webrtc' | 'hls' | 'offline'
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [connecting, setConnecting] = useState(true);
-  const containerRef = useRef(null);
 
   const isOnline = status === 'ONLINE';
+  const numericFps = Number(fps) || 0;
 
-  // Cleanup function
-  const cleanup = () => {
+  // Sync fullscreen state with native browser event (e.g. user presses Esc)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  // Guarantee video element is muted in DOM for reliable autoplay policy
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = true;
+    }
+  }, []);
+
+  // Cleanup peer connection and video stream
+  const cleanup = useCallback(() => {
     if (pcRef.current) {
-      pcRef.current.close();
+      try {
+        pcRef.current.close();
+      } catch {
+        // Ignore close errors
+      }
       pcRef.current = null;
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
-      videoRef.current.src = '';
+      videoRef.current.removeAttribute('src');
+    }
+  }, []);
+
+  // Helper to safely invoke video.play() across browsers and JSDOM
+  const safePlay = () => {
+    if (!videoRef.current) return;
+    try {
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+      }
+    } catch {
+      // Ignore synchronous play rejection
     }
   };
 
-  // Connect via WebRTC to MediaMTX
-  const connectWebRTC = async () => {
+  // Fallback to HLS
+  const fallbackToHLS = useCallback(() => {
     cleanup();
+    if (!isMountedRef.current) return;
+    setMode('hls');
+
+    if (videoRef.current && mediamtxHlsUrl) {
+      const cleanHlsUrl = mediamtxHlsUrl.replace(/\/+$/, '');
+      videoRef.current.src = `${cleanHlsUrl}/cam/${cameraId}/index.m3u8`;
+      safePlay();
+    }
+  }, [cameraId, cleanup, mediamtxHlsUrl]);
+
+  // Connect via WebRTC (WHEP) to MediaMTX
+  const connectWebRTC = useCallback(async () => {
+    cleanup();
+    if (!isMountedRef.current) return;
     setConnecting(true);
+    setMode('webrtc');
+
+    if (typeof window === 'undefined' || typeof RTCPeerConnection === 'undefined') {
+      console.warn(`[WebRTC:${cameraId}] RTCPeerConnection not supported in this environment`);
+      fallbackToHLS();
+      return;
+    }
 
     try {
       const pc = new RTCPeerConnection({
-        iceServers: []
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       });
       pcRef.current = pc;
 
+      // TransGuard cameras only push video (libx264). Audio is not published.
       pc.addTransceiver('video', { direction: 'recvonly' });
-      pc.addTransceiver('audio', { direction: 'recvonly' });
 
       pc.ontrack = (event) => {
-        if (videoRef.current && event.streams && event.streams[0]) {
+        if (!isMountedRef.current || !videoRef.current) return;
+        if (event.streams && event.streams[0]) {
           videoRef.current.srcObject = event.streams[0];
-          setConnecting(false);
+        } else if (event.track) {
+          let stream = videoRef.current.srcObject;
+          if (!stream || !(stream instanceof MediaStream)) {
+            stream = new MediaStream();
+            videoRef.current.srcObject = stream;
+          }
+          stream.addTrack(event.track);
         }
+        safePlay();
       };
 
       pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-          console.warn(`[WebRTC:${cameraId}] Connection failed, falling back to HLS`);
+        if (!pcRef.current) return;
+        if (pc.iceConnectionState === 'failed') {
+          console.warn(`[WebRTC:${cameraId}] Connection failed, attempting HLS fallback`);
           fallbackToHLS();
+        } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          if (isMountedRef.current) setConnecting(false);
         }
       };
 
       const offer = await pc.createOffer();
+      if (!isMountedRef.current || pcRef.current !== pc) return;
       await pc.setLocalDescription(offer);
 
-      // MediaMTX WebRTC WHEP endpoint
-      const whepUrl = `${mediamtxUrl}/cam/${cameraId}/whep`;
+      const cleanMediaUrl = (mediamtxUrl || '').replace(/\/+$/, '');
+      const whepUrl = `${cleanMediaUrl}/cam/${cameraId}/whep`;
+
       const res = await fetch(whepUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
-        body: pc.localDescription.sdp
+        body: pc.localDescription.sdp,
       });
 
       if (!res.ok) {
@@ -78,29 +150,19 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
       }
 
       const answerSdp = await res.text();
+      if (!isMountedRef.current || pcRef.current !== pc) return;
       await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.warn(`[WebRTC:${cameraId}] Failed:`, err.message);
       fallbackToHLS();
     }
-  };
+  }, [cameraId, cleanup, fallbackToHLS, mediamtxUrl]);
 
-  // Fallback to HLS
-  const fallbackToHLS = () => {
-    cleanup();
-    setMode('hls');
-    setConnecting(false);
-
-    if (videoRef.current && mediamtxHlsUrl) {
-      videoRef.current.src = `${mediamtxHlsUrl}/cam/${cameraId}/index.m3u8`;
-      videoRef.current.play().catch(() => {});
-    }
-  };
-
-  // Retry connection
+  // Retry connection on button click
   const retryConnection = () => {
-    setMode('webrtc');
+    if (!isOnline) return;
     connectWebRTC();
   };
 
@@ -108,13 +170,14 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true));
+      containerRef.current.requestFullscreen().catch(() => {});
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false));
+      document.exitFullscreen().catch(() => {});
     }
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     if (isOnline) {
       connectWebRTC();
     } else {
@@ -123,9 +186,11 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
       setConnecting(false);
     }
 
-    return cleanup;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, isOnline]);
+    return () => {
+      isMountedRef.current = false;
+      cleanup();
+    };
+  }, [cameraId, isOnline, connectWebRTC, cleanup]);
 
   return (
     <div
@@ -138,6 +203,8 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
         autoPlay
         playsInline
         muted
+        onPlaying={() => setConnecting(false)}
+        onLoadedData={() => setConnecting(false)}
         className={`w-full aspect-video object-cover ${!isOnline || connecting ? 'opacity-30' : 'opacity-100'} transition-opacity`}
       />
 
@@ -153,7 +220,7 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
       {isOnline && connecting && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
           <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mb-3" />
-          <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Connecting...</span>
+          <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Connecting Stream...</span>
         </div>
       )}
 
@@ -166,15 +233,17 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
         </div>
 
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            type="button"
-            onClick={retryConnection}
-            className="p-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
-            title="Reconnect"
-            aria-label="Reconnect stream"
-          >
-            <RefreshCw size={12} className="text-white/80" />
-          </button>
+          {isOnline && (
+            <button
+              type="button"
+              onClick={retryConnection}
+              className="p-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
+              title="Reconnect stream"
+              aria-label="Reconnect stream"
+            >
+              <RefreshCw size={12} className="text-white/80" />
+            </button>
+          )}
           <button
             type="button"
             onClick={toggleFullscreen}
@@ -195,7 +264,7 @@ const WebRTCPlayer = memo(({ cameraId, status, fps, mediamtxUrl, mediamtxHlsUrl 
         <div className="flex items-center gap-3">
           {isOnline && (
             <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded">
-              {fps > 0 ? `${fps.toFixed(1)} FPS` : 'LIVE'}
+              {numericFps > 0 ? `${numericFps.toFixed(1)} FPS` : 'LIVE'}
             </span>
           )}
           <span className="text-[10px] font-bold text-white/50 uppercase">
