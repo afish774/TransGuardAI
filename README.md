@@ -1,281 +1,193 @@
-<div align="center">
+﻿# TransGuard AI
 
-# 🛡️ TransGuard AI
+Edge video analytics and an operator dashboard for monitoring camera incidents. The repository contains a Python vision engine, a Node.js API, a React dashboard, and Docker deployment files.
 
-**6-Pillar AI Surveillance Platform**
+> **Project status:** Active development. Detection thresholds and event logic are configurable, but this repository does not include a published, labeled field evaluation. Measure false alerts and missed detections on representative footage before relying on the system operationally.
 
-Real-time edge detection • WebRTC streaming • Operator dashboard
+## What’s included
 
-[![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com/)
-[![MongoDB](https://img.shields.io/badge/MongoDB-7-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com/)
+- **Edge engine:** RTSP, HTTP, and webcam capture; YOLO object detection and tracking; event detectors for crowding, unattended baggage, falls, weapons, violence, and watchlist matches.
+- **API and storage:** Express endpoints, MongoDB models, authentication, edge event ingestion, and Socket.IO updates.
+- **Operator dashboard:** React views for cameras, incidents, live video, maps, and operational summaries.
+- **Streaming:** MediaMTX configuration for RTSP, WebRTC, and HLS workflows.
 
-</div>
-
----
-
-## Overview
-
-TransGuard AI is a production-grade AI surveillance platform that combines a **Python edge engine** (YOLO + ByteTrack + MediaPipe + face_recognition) with a **Node.js real-time backend** (Express + Socket.IO + MongoDB) and a **React operator dashboard** — all containerized with Docker for single-command deployment.
-
-The system processes live RTSP camera feeds through six independent AI detection pillars, raises real-time alerts via WebSocket, and provides operators with a cinematic glassmorphism dashboard for monitoring and incident management.
-
-### Technical Documentation
-- **[Mobile Camera RTSP Demo & Transit Testing Guide](docs/MOBILE_DEMO_GUIDE.md)** — Simple English step-by-step instructions for running the complete 6-pillar surveillance demo using a smartphone camera (no physical hardware required).
-- **[Master Architecture & Project State Manual](docs/PROJECT_ARCHITECTURE_AND_STATE.md)** — Complete architectural specification, security models, test matrix, and historical evolution (7.5 to 10/10) for AI models and engineers.
-- **[System Block Diagrams & Circuit Schematics](docs/DIAGRAMS.md)** — Complete software/hardware block diagrams, sequence flowcharts, and electronic circuit schematics with Bill of Materials.
-- **[Computer Vision Mathematical Architecture](docs/TECHNICAL_ARCHITECTURE.md)** — Mathematical formulations, skeletal geometry, and temporal confirmation algorithms for the 6 edge detection pillars.
+The detectors use model outputs, tracking, geometry, and temporal rules. Their scores are not a substitute for per-camera validation or calibrated probabilities.
 
 ## Architecture
 
 ```mermaid
-graph LR
-    subgraph Edge["Edge Engine (Python 3.11)"]
-        C[RTSP Camera] --> CAP[Capture Worker]
-        CAP --> INF[Inference Worker]
-        INF --> PUB[Publisher Worker]
-        INF --> TEL[Telemetry Worker]
-    end
-
-    subgraph Backend["Backend (Node.js 20)"]
-        TEL -->|"HMAC-signed HTTP"| API[Express API]
-        API --> DB[(MongoDB 7)]
-        API --> SIO[Socket.IO]
-    end
-
-    subgraph Dashboard["Dashboard (React 19)"]
-        SIO -->|"WebSocket"| UI[Operator UI]
-        PUB -->|"WebRTC / HLS"| UI
-    end
+flowchart LR
+    Camera[RTSP / HTTP / webcam] --> Capture[Edge capture worker]
+    Capture --> Inference[Detection and tracking worker]
+    Inference --> Events[Incident queue]
+    Inference --> Stream[MediaMTX publisher]
+    Events --> API[Express API]
+    API --> DB[(MongoDB)]
+    API --> Socket[Socket.IO]
+    Socket --> UI[React operator dashboard]
+    Stream --> UI
 ```
 
-## 6 AI Detection Pillars
+The Python engine runs capture, inference, publishing, and telemetry in separate worker processes. Queues are bounded so slow consumers do not cause unbounded frame backlog.
 
-| # | Pillar | Method | Key Parameters |
-|:-:|:-------|:-------|:---------------|
-| 1 | **Overcrowding** | Person count with temporal consensus | `CROWD_PERSON_THRESHOLD=2`, `CROWD_CONSENSUS_FRAMES=15` |
-| 2 | **Unattended Baggage** | Stationary object + owner proximity | `BAGGAGE_STATIONARY_SECONDS=10`, `BAGGAGE_PROXIMITY_RADIUS_PX=120` |
-| 3 | **Fall Detection** | MediaPipe skeletal geometry (torso angle + bbox aspect ratio) | `FALL_ANGLE_THRESHOLD_DEG=45`, `FALL_CONFIRM_FRAMES=5` |
-| 4 | **Weapon Detection** | Secondary fine-tuned YOLO on person crops | `WEAPON_CONF_THRESHOLD=0.45`, `WEAPON_CONFIRM_FRAMES=3` |
-| 5 | **Violence Detection** | IoU overlap + wrist velocity via pose estimation | `VIOLENCE_IOU_THRESHOLD=0.15`, `VIOLENCE_WRIST_SPEED_PX_S=320` |
-| 6 | **Face Detection & Watchlist** | Deep metric learning (128-d ResNet embeddings) with upper-body RoI search and track memoisation | `FACE_MATCH_TOLERANCE=0.50`, `WATCHLIST_SYNC_SECONDS=300` |
+## Requirements
 
-**Additional capabilities:** ByteTrack multi-object tracking, low-latency WebRTC live broadcast, and real-time public transit GPS map tracking.
+- Node.js 20 or newer and npm
+- Python 3.10 or 3.11 for the edge engine
+- MongoDB for persistent backend storage
+- Camera stream or webcam for live edge inference
+- Model weights required by the selected detectors
 
-## Quick Start
+The Python dependencies include PyTorch, Ultralytics, MediaPipe, and face-recognition/dlib. Install them in a virtual environment and use the platform-specific installation guidance for dlib where needed.
 
-### Option 1: Docker Compose (Recommended)
+## Local setup
 
-```bash
-# Clone the repo
-git clone https://github.com/your-org/transguard-ai.git
-cd transguard-ai
-
-# Copy environment templates
-cp .env.example .env
-cp .env.edge.example .env.edge
-
-# Edit .env with your secrets (JWT_SECRET, DEFAULT_ADMIN_PASSWORD, etc.)
-
-# Start dashboard + MongoDB
-docker compose up -d
-
-# Start full stack with AI engine (requires RTSP camera)
-docker compose --profile full up -d
-
-# Scale to 3 camera engines
-docker compose --profile full up -d --scale engine=3
-```
-
-### Option 2: Local Development
+### Backend
 
 ```bash
-# Backend
 npm install
-cp .env.example .env     # Edit with your values
-node server.js
+cp .env.example .env
+# Edit .env and set unique secrets and your MongoDB connection.
+npm start
+```
 
-# Frontend (separate terminal)
+The API listens on port `5000` by default. Do not use example secrets for a deployed instance.
+
+### Dashboard
+
+In another terminal:
+
+```bash
 cd frontend
 npm install
-npm run dev              # Vite dev server on :5173
-
-# Python engine (separate terminal)
-pip install -r requirements.txt
-python trans_guard_engine.py --camera cam0 --url rtsp://your-camera:554/stream
+npm run dev
 ```
 
-### Default Credentials
+Vite prints the local dashboard URL. The production bundle can be generated with `npm run build` from `frontend/`.
 
-| Role | Username | Password | Notes |
-|:-----|:---------|:---------|:------|
-| Admin | `admin` | `TransGuard@2026!` | Set via `DEFAULT_ADMIN_PASSWORD` env var |
+### Edge engine
 
-> ⚠️ **Change the default password immediately in production.**
+Create a Python virtual environment, install dependencies, and configure the edge environment:
 
-## Environment Variables
+```bash
+python -m venv .venv
+# Activate the environment using the command for your shell.
+pip install -r requirements.txt
+cp .env.edge.example .env.edge
+# Set the camera URL and an EDGE_API_KEY matching the backend's configured key.
+python trans_guard_engine.py
+```
+
+The engine loads `.env.edge` from the current working directory. Set `EDGE_ENV_FILE` to use a different file. Existing process environment variables take precedence over values in the file. CLI options override environment defaults; use `python trans_guard_engine.py --help` to see them.
+
+To select a source directly:
+
+```bash
+python trans_guard_engine.py --camera CAM_01 --rtsp "rtsp://camera-address/stream" --backend-url "http://127.0.0.1:5000"
+```
+
+Numeric camera sources such as `--rtsp 0` select a local webcam. RTSP credentials should be supplied through protected configuration and should not be committed to the repository.
+
+## Configuration
 
 ### Backend (`.env`)
 
-| Variable | Default | Description |
-|:---------|:--------|:------------|
-| `MONGO_URI` | `mongodb://127.0.0.1:27017/transguard` | MongoDB connection string |
-| `JWT_SECRET` | `transguard-dashboard-jwt-secret` | JWT signing secret (change in production!) |
-| `DEFAULT_ADMIN_PASSWORD` | `TransGuard@2026!` | Initial admin password (dev seeding only) |
-| `DEFAULT_EDGE_API_KEY` | `transguard-edge-secret-key-9042` | Initial edge node API key |
-| `PORT` | `5000` | HTTP server port |
-| `NODE_ENV` | `development` | `development` or `production` |
-| `CORS_ORIGINS` | _(empty = allow all)_ | Comma-separated allowed origins |
-| `MAX_EVIDENCE_BYTES` | `5242880` (5 MB) | Max evidence image upload size |
+| Variable | Purpose |
+| --- | --- |
+| `MONGO_URI` | MongoDB connection string |
+| `JWT_SECRET` | Secret used to sign dashboard sessions |
+| `DEFAULT_ADMIN_PASSWORD` | Initial development admin account password |
+| `DEFAULT_EDGE_API_KEY` | Initial edge node key; configure the same key on the engine |
+| `PORT` | API port, default `5000` |
+| `NODE_ENV` | Runtime mode |
+| `CORS_ORIGINS` | Comma-separated allowed origins |
 
-### Edge Engine (`.env.edge`)
+### Edge (`.env.edge`)
 
-| Variable | Default | Description |
-|:---------|:--------|:------------|
-| `RTSP_URL` | `rtsp://host.docker.internal:8554/cam0` | Camera RTSP stream URL |
-| `BACKEND_URL` | `http://host.docker.internal:5000` | Backend API endpoint |
-| `EDGE_API_KEY` | `transguard-edge-secret-key-9042` | API key (must match backend) |
-| `CAMERA_ID` | `cam0` | Unique camera identifier |
-| `YOLO_MODEL` | `yolov8n.pt` | Primary YOLO model path |
-| `WEAPON_MODEL` | `yolov8n-weapons.pt` | Weapon detection model path |
-| `YOLO_CONF` | `0.45` | Detection confidence threshold |
+| Variable | Purpose | Example default |
+| --- | --- | --- |
+| `RTSP_URL` | Camera URL or numeric webcam index | `rtsp://127.0.0.1:8554/cam0` |
+| `BACKEND_URL` | API base URL | `http://127.0.0.1:5000` |
+| `EDGE_API_KEY` | Must match the backend edge key | Set locally |
+| `CAMERA_ID` | Unique camera identifier | `cam0` |
+| `YOLO_MODEL` | Primary object model path | `yolov8n.pt` |
+| `YOLO_CONF` | Primary model confidence floor | `0.45` |
+| `WEAPON_MODEL` | Weapon model path | `yolov8n-weapons.pt` |
+| `WEAPON_CONF` | Weapon model confidence floor | `0.38` |
+| `WEAPON_CONFIRM_FRAMES` | Temporal confirmation setting for lower-confidence hits | `4` |
+| `CROWD_THRESHOLD` | Crowd headcount threshold | `8` |
+| `CROWD_FRAMES` | Crowd confirmation frames | `20` |
+| `FACE_MATCH_TOLERANCE` | Face matching distance threshold | `0.50` |
+| `FRAME_WIDTH`, `FRAME_HEIGHT`, `FRAME_FPS` | Capture dimensions and target rate | `1280`, `720`, `25` |
+| `VEHICLE_ID` | Vehicle label attached to incidents | `BUS_001` |
+| `FALLBACK_LAT`, `FALLBACK_LON` | Base coordinates for the engine's approximate location payload; this is not a live GPS feed | Configured locally |
 
-## API Reference
+Thresholds depend on camera placement, image quality, model weights, and frame rate. Tune them against labeled footage; avoid raising or lowering a threshold based only on a few incidents.
 
-### Authentication
-| Method | Endpoint | Auth | Description |
-|:-------|:---------|:-----|:------------|
-| `POST` | `/api/auth/login` | None | Login with username/password, returns JWT |
-| `POST` | `/api/auth/register` | JWT (Admin) | Create a new operator or admin user |
+## Docker
 
-### Alerts & Incidents
-| Method | Endpoint | Auth | Description |
-|:-------|:---------|:-----|:------------|
-| `POST` | `/api/alerts` | Edge API Key | Ingest incident (multipart/form-data) |
-| `GET` | `/api/alerts/history` | JWT | Fetch last 100 incidents |
-| `PATCH` | `/api/alerts/:id/acknowledge` | JWT | Mark incident as REVIEWED/DISMISSED |
-
-### Edge Node Management
-| Method | Endpoint | Auth | Description |
-|:-------|:---------|:-----|:------------|
-| `POST` | `/api/edge/heartbeat` | Edge API Key | Camera heartbeat with FPS/status |
-| `GET` | `/api/edge/cameras` | JWT | List all active cameras |
-| `POST` | `/api/edge/zone` | JWT | Set geofence polygon for a camera |
-| `GET` | `/api/edge/zone/:camera_id` | Edge API Key | Get zone polygon |
-| `POST` | `/api/edge/provision` | JWT | Spawn a Python engine for a camera |
-
-### Watchlist
-| Method | Endpoint | Auth | Description |
-|:-------|:---------|:-----|:------------|
-| `GET` | `/api/watchlist` | Edge API Key | Get active watchlist targets |
-| `POST` | `/api/watchlist` | JWT | Upload a new watchlist target |
-
-### System
-| Method | Endpoint | Auth | Description |
-|:-------|:---------|:-----|:------------|
-| `GET` | `/api/health` | None | Health check (MongoDB status, uptime, version) |
-| `GET` | `/api/control/status` | JWT | Get monitoring enabled/disabled state |
-| `POST` | `/api/control/toggle` | JWT | Toggle monitoring on/off |
-
-## Testing
+Copy both environment templates before starting Compose. The edge file is referenced by the engine service even when its profile is not selected.
 
 ```bash
-# Run all tests (Python + Backend)
+cp .env.example .env
+cp .env.edge.example .env.edge
+# Set unique secrets and configure the camera and edge key.
+docker compose up -d
+```
+
+The edge engine is behind the `full` profile:
+
+```bash
+# Configure camera, backend address, and matching edge key in .env.edge.
+docker compose --profile full up -d
+```
+
+Review `docker-compose.yml` before deployment to confirm the selected profile, camera networking, model mounts, and environment values suit the target host.
+
+## Useful commands
+
+```bash
+npm test                  # Python detector tests followed by backend tests
+npm run test:backend      # Backend API tests
+npm run lint              # Root JavaScript lint
+```
+
+For frontend checks:
+
+```bash
+cd frontend
 npm test
-
-# Python AI engine tests only (42 tests)
-npm run test:python
-
-# Backend API integration tests only (Jest + Supertest)
-npm run test:backend
-
-# Frontend component tests (Vitest + React Testing Library)
-cd frontend && npm test
+npm run lint
+npm run build
 ```
 
-### Test Coverage
+The combined root test command requires Python to be available as `python`. Run individual checks only after installing their project dependencies.
 
-| Layer | Framework | Tests | Coverage |
-|:------|:----------|------:|:---------|
-| AI Engine | Python `unittest` | 42 | Geometry, crowd detection, fall detection, violence detection, resolution scaling, adversarial negatives |
-| Backend API | Jest + Supertest | 20 | Auth, alerts, edge routes, health, RBAC, validation |
-| Frontend UI | Vitest + RTL | 10+ | ErrorBoundary, Skeleton, ToastProvider, LoginView |
+## API overview
 
-## Security
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/auth/login` | Authenticate a dashboard user |
+| `POST` | `/api/alerts` | Receive an edge incident |
+| `GET` | `/api/alerts/history` | Retrieve incident history |
+| `POST` | `/api/edge/heartbeat` | Receive edge node health |
+| `GET` | `/api/edge/cameras` | List camera nodes |
+| `GET`, `POST` | `/api/watchlist` | Read or update watchlist entries |
+| `GET` | `/api/health` | Check API and database health |
 
-| Layer | Measure |
-|:------|:--------|
-| **Passwords** | bcrypt with 12 salt rounds, never stored in plaintext |
-| **API Keys** | SHA-256 hashed at rest, raw key never persisted |
-| **Request Integrity** | HMAC-SHA256 signing with `crypto.timingSafeEqual` |
-| **Input Validation** | Joi schemas on every mutating endpoint |
-| **Rate Limiting** | 5 login attempts per 15 min, 15 alerts per second |
-| **HTTP Security** | Helmet (CSP, HSTS, X-Frame-Options, X-Content-Type-Options) |
-| **Containers** | Non-root users (`transguard`, `engineuser`) in all Docker images |
-| **Secrets** | `.env` files excluded from Git and Docker image layers |
-| **RBAC** | Admin-only routes for user registration and provisioning |
+See `routes/` for route behavior and authentication requirements.
 
-## Deployment
+## Further documentation
 
-### Docker (Production)
+- [Mobile camera demo guide](docs/MOBILE_DEMO_GUIDE.md)
+- [Architecture and project state](docs/PROJECT_ARCHITECTURE_AND_STATE.md)
+- [System diagrams](docs/DIAGRAMS.md)
+- [Computer vision architecture](docs/TECHNICAL_ARCHITECTURE.md)
 
-```bash
-docker compose up -d                          # Dashboard + MongoDB
-docker compose --profile full up -d           # Full stack with AI engine
-```
+## Security and privacy
 
-### Render (PaaS)
-
-Connect this repo to [Render](https://render.com) — the included `render.yaml` blueprint auto-configures the backend service. Set `MONGO_URI` (MongoDB Atlas recommended) and `JWT_SECRET` in the Render dashboard.
-
-### GPU Acceleration
-
-Uncomment the `deploy.resources` block in `docker-compose.yml` to enable NVIDIA GPU passthrough for the AI engine. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-
-## Project Structure
-
-```
-transguard-ai/
-├── server.js                  # Express + Socket.IO backend (783 lines)
-├── trans_guard_engine.py      # Python edge engine entrypoint
-├── engine/                    # Modularized AI Engine
-│   ├── main.py                # Process orchestration (Capture, Inference, Publisher, Telemetry)
-│   ├── config.py              # Centralized engine config
-│   ├── utils/                 # Geometry, queues, logging
-│   └── detectors/             # AI Pillars (baggage.py, crowd.py, pose.py, violence.py, watchlist.py, weapon.py)
-├── frontend/                  # React 19 + Vite + Tailwind dashboard
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── components/        # Sidebar, WebRTCPlayer, Toast, charts/, etc.
-│   │   ├── pages/             # LoginView.jsx
-│   │   └── views/             # Modular dashboard views (Insights, Map, Watchlist, etc.)
-│   └── vite.config.js
-├── models/                    # Mongoose schemas
-│   ├── Incident.js
-│   ├── EdgeNode.js
-│   ├── User.js
-│   └── WatchlistTarget.js
-├── middleware/
-│   ├── auth.js                # JWT + HMAC + Edge API key verification
-│   └── validate.js            # Joi validation middleware + schemas
-├── jobs/
-│   └── retentionCron.js       # 30-day incident purge
-├── utils/
-│   └── logger.js              # Winston structured logging
-├── tests/
-│   ├── test_fusion_detectors.py  # Python AI unit tests (42 tests)
-│   └── backend/                  # Jest API integration tests
-├── docker/
-│   └── engine-entrypoint.sh   # Engine process supervisor
-├── Dockerfile.backend         # Multi-stage Node.js build
-├── Dockerfile.engine          # Multi-stage Python build (dlib, FFmpeg, MediaMTX)
-├── docker-compose.yml         # 3-service orchestration with profiles
-├── render.yaml                # Render PaaS deployment blueprint
-├── .env.example               # Backend env template
-└── .env.edge.example          # Edge engine env template
-```
+Use unique, randomly generated secrets for the API, JWT signing, and administrator account. Keep `.env`, `.env.edge`, camera credentials, watchlist images, and incident evidence out of source control. Restrict network access to camera streams and backend endpoints, and apply the retention policy required by your deployment. Watchlist matching involves sensitive biometric data; define authorization, access, retention, and review procedures before enabling it.
 
 ## License
 
-ISC
+ISC. See `package.json` for package metadata.

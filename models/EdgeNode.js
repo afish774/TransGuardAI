@@ -25,6 +25,8 @@ const edgeNodeSchema = new mongoose.Schema({
   // Updated by POST /api/edge/heartbeat from each Python engine instance.
   cameras: [{
     camera_id: { type: String, required: true },
+    vehicle_id: { type: String, default: 'BUS_001' },
+    camera_position: { type: String, default: '' },
     rtsp_url: { type: String },
     status: { type: String, enum: ['ONLINE', 'OFFLINE'], default: 'OFFLINE' },
     last_heartbeat: { type: Date },

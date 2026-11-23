@@ -1,48 +1,71 @@
 import React, { memo, useState, useEffect, useRef } from 'react';
-import { Search, LayoutDashboard, ShieldCheck, Play, Inbox, FileText, ChevronUp, Video, Eye } from 'lucide-react';
+import { motion } from 'framer-motion';
+import {
+  Search,
+  LayoutDashboard,
+  MapPin,
+  FileSpreadsheet,
+  BarChart3,
+  FileText,
+  Video,
+  Eye,
+  Users,
+  LogOut,
+} from 'lucide-react';
+import { SPRING, StatusDot } from './ui/LuxuryPrimitives';
+import BrandLogo from './BrandLogo';
 
-const NavItem = ({ label, activeTab, setActiveTab, icon: Icon, badge, indent = false, searchQuery = '' }) => {
+const NavItem = ({ label, activeTab, setActiveTab, icon: Icon, searchQuery = '' }) => {
   const isActive = activeTab === label;
-  if (!label.toLowerCase().includes(searchQuery.trim().toLowerCase())) return null;
+  if (searchQuery.trim() && !label.toLowerCase().includes(searchQuery.trim().toLowerCase())) {
+    return null;
+  }
 
   return (
-    <button
+    <motion.button
       type="button"
       aria-current={isActive ? 'page' : undefined}
       onClick={() => setActiveTab(label)}
-      className={`w-full flex items-center justify-between text-left py-1.5 text-sm relative transition-colors ${indent ? 'px-3' : 'px-2'} ${isActive
-          ? 'text-gray-900 dark:text-zinc-100 font-semibold'
-          : 'text-gray-500 dark:text-zinc-500 hover:text-gray-900 dark:hover:text-white font-medium'
+      whileTap={{ scale: 0.985 }}
+      transition={{ duration: 0.12 }}
+      className={`group w-full flex items-center gap-2.5 text-left px-2.5 py-2 rounded-lg text-[13px] relative transition-colors cursor-pointer ${isActive
+        ? 'text-[var(--text-primary)] font-medium'
+        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
         }`}
     >
       {isActive && (
-        <div className={`absolute ${indent ? 'left-[-24px]' : 'left-[-16px]'} w-[2px] h-4 bg-gray-900 dark:bg-indigo-500 rounded-r`}></div>
+        <motion.div
+          layoutId="nav-active-pill"
+          transition={SPRING}
+          className="absolute inset-0 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-hairline)]"
+        />
       )}
 
-      <div className="flex items-center gap-2.5">
-        {Icon && <Icon size={indent ? 16 : 14} className={isActive ? "text-gray-900 dark:text-zinc-100" : "text-gray-400 dark:text-zinc-500"} />}
-        {label}
-      </div>
-
-      {badge && (
-        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isActive
-            ? 'bg-gray-200 dark:bg-white/10 text-gray-800 dark:text-zinc-200'
-            : 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-zinc-400'
-          }`}>
-          {badge}
-        </span>
+      {Icon && (
+        <Icon
+          size={15}
+          strokeWidth={1.75}
+          className={`relative z-10 shrink-0 transition-colors ${isActive
+            ? 'text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] group-hover:text-[var(--text-secondary)]'
+            }`}
+        />
       )}
-    </button>
+      <span className="relative z-10 truncate">{label}</span>
+    </motion.button>
   );
 };
 
-const Sidebar = memo(({ isDarkMode, toggleDarkMode, activeTab, setActiveTab }) => {
+const Sidebar = memo(({ activeTab, setActiveTab, onLogout }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [username, setUsername] = useState(() => localStorage.getItem('tg_username') || 'Operations Admin');
+  const [username, setUsername] = useState(
+    () => localStorage.getItem('tg_username') || 'Operations Admin'
+  );
   const searchInputRef = useRef(null);
 
   useEffect(() => {
-    const updateUsername = () => setUsername(localStorage.getItem('tg_username') || 'Operations Admin');
+    const updateUsername = () =>
+      setUsername(localStorage.getItem('tg_username') || 'Operations Admin');
     window.addEventListener('storage', updateUsername);
 
     const handleKeyDown = (e) => {
@@ -58,118 +81,161 @@ const Sidebar = memo(({ isDarkMode, toggleDarkMode, activeTab, setActiveTab }) =
     };
   }, []);
 
+  const initials =
+    username
+      .split(/[\s._-]+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s) => s[0]?.toUpperCase())
+      .join('') || 'OP';
+
   return (
-    <div className="flex w-[260px] h-full bg-[#fcfcfc] dark:bg-zinc-900/95 dark:backdrop-blur-xl flex-col border-r border-gray-200 dark:border-white/10 z-10 shrink-0 shadow-sm relative">
-      <div className="px-5 py-5 flex items-center gap-2 mb-2">
-        <div className="w-7 h-7 bg-black dark:bg-[#222] rounded-md flex items-center justify-center">
-          <Play size={12} className="text-white ml-0.5" fill="currentColor" />
-        </div>
-        <span className="font-bold text-gray-900 dark:text-zinc-100 text-lg tracking-tight">TRANS GUARD AI</span>
+    <aside className="flex w-[220px] h-full bg-[var(--bg-rail)] flex-col border-r border-[var(--border-hairline)] z-10 shrink-0 select-none">
+      {/* Prominent Brand Lockup Header */}
+      <div className="px-4 pt-5 pb-4 border-b border-[var(--border-hairline)] flex items-center">
+        <BrandLogo variant="full" className="w-[156px] h-[44px]" alt="TransGuard AI" />
       </div>
 
-      <div className="px-4 mb-6">
+      {/* Quick Jump */}
+      <div className="px-3 pt-3 pb-2">
         <div className="relative">
-          <Search className="absolute left-3 top-2.5 text-gray-400 dark:text-zinc-500" size={14} />
+          <Search
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]"
+            size={13}
+            strokeWidth={1.75}
+          />
           <input
             ref={searchInputRef}
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search views..."
+            placeholder="Search"
             aria-label="Search navigation"
-            className="w-full bg-white dark:bg-zinc-950/80 dark:backdrop-blur-xl border border-gray-200 dark:border-white/10 rounded-lg pl-9 pr-8 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300 text-gray-700 dark:text-zinc-200 shadow-sm"
+            className="w-full h-8 bg-[var(--bg-input)] border border-[var(--border-hairline)] rounded-lg pl-8 pr-9 text-[12px] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-hover)] transition-colors"
           />
-          <span className="absolute right-2 top-2.5 text-[10px] text-gray-400 dark:text-zinc-500 font-bold bg-gray-100 dark:bg-white/5 rounded px-1.5 py-0.5 border border-gray-200 dark:border-white/10 pointer-events-none">⌘K</span>
+          <kbd className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[9px] text-[var(--text-muted)] pointer-events-none">
+            ⌘K
+          </kbd>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 custom-scrollbar">
-        <div className="mb-6">
-          <div className="px-3 mb-1.5 flex items-center gap-2.5 text-gray-900 dark:text-zinc-100">
-            <LayoutDashboard size={16} className="text-gray-500 dark:text-zinc-500" />
-            <span className="text-sm font-semibold">Live Operations</span>
+      {/* Navigation Groups */}
+      <nav className="flex-1 overflow-y-auto px-2.5 py-2 space-y-6 custom-scrollbar">
+        <div>
+          <div className="px-2.5 mb-1.5 text-[10px] font-medium text-[var(--text-muted)] uppercase tracking-[0.06em]">
+            Command
           </div>
-          <div className="flex flex-col ml-8">
-            <NavItem label="Dashboard" searchQuery={searchQuery} activeTab={activeTab} setActiveTab={setActiveTab} />
-            <NavItem label="Spatial Map Tracking" searchQuery={searchQuery} activeTab={activeTab} setActiveTab={setActiveTab} />
-          </div>
-        </div>
-
-        <div className="mb-6">
-          <div className="px-3 mb-1.5 flex items-center gap-2.5 text-gray-900 dark:text-zinc-100">
-            <ShieldCheck size={16} className="text-gray-500 dark:text-zinc-500" />
-            <span className="text-sm font-semibold">Safety Pillars</span>
-          </div>
-          <div className="flex flex-col ml-8">
-            <NavItem label="Incident Logs" searchQuery={searchQuery} activeTab={activeTab} setActiveTab={setActiveTab} />
-            <NavItem label="Insights" searchQuery={searchQuery} activeTab={activeTab} setActiveTab={setActiveTab} />
-            <NavItem label="Watchlist Queue" searchQuery={searchQuery} icon={Eye} activeTab={activeTab} setActiveTab={setActiveTab} />
-          </div>
-        </div>
-
-        <div className="mb-6">
-          <div className="px-3 mb-3 text-[10px] font-bold text-gray-400 dark:text-zinc-500 uppercase tracking-widest">Systems</div>
-          <div className="flex flex-col gap-0.5">
-            <NavItem label="Camera Nodes" searchQuery={searchQuery} icon={Video} indent={true} activeTab={activeTab} setActiveTab={setActiveTab} />
+          <div className="space-y-0.5">
+            <NavItem
+              label="Dashboard"
+              icon={LayoutDashboard}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+            <NavItem
+              label="Spatial Map Tracking"
+              icon={MapPin}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
           </div>
         </div>
 
-        <div className="mb-6">
-          <div className="px-3 mb-2 flex items-center justify-between text-[10px] font-bold text-gray-400 dark:text-zinc-500 uppercase tracking-widest">
-            Workspace
-            <ChevronUp size={14} className="text-gray-400 dark:text-zinc-500" />
+        <div>
+          <div className="px-2.5 mb-1.5 text-[10px] font-medium text-[var(--text-muted)] uppercase tracking-[0.06em]">
+            Operations
           </div>
-          <div className="flex flex-col gap-0.5">
-            <NavItem label="My team" searchQuery={searchQuery} icon={Inbox} indent={true} activeTab={activeTab} setActiveTab={setActiveTab} />
-            <NavItem label="Docs" searchQuery={searchQuery} icon={FileText} indent={true} activeTab={activeTab} setActiveTab={setActiveTab} />
+          <div className="space-y-0.5">
+            <NavItem
+              label="Incident Logs"
+              icon={FileSpreadsheet}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+            <NavItem
+              label="Insights"
+              icon={BarChart3}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+            <NavItem
+              label="Watchlist Queue"
+              icon={Eye}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+            <NavItem
+              label="Camera Nodes"
+              icon={Video}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
           </div>
         </div>
-      </div>
 
-      <div className="mt-auto p-4 border-t border-gray-100 dark:border-white/5 flex items-center justify-between bg-white dark:bg-zinc-950/80 dark:backdrop-blur-xl">
-        <div className="flex items-center gap-3 min-w-0">
-          <img
-            src={`https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=4f46e5&color=fff&size=64`}
-            className="w-8 h-8 rounded-full shadow-sm shrink-0"
-            alt={username}
-          />
+        <div>
+          <div className="px-2.5 mb-1.5 text-[10px] font-medium text-[var(--text-muted)] uppercase tracking-[0.06em]">
+            System
+          </div>
+          <div className="space-y-0.5">
+            <NavItem
+              label="My team"
+              icon={Users}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+            <NavItem
+              label="Docs"
+              icon={FileText}
+              searchQuery={searchQuery}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
+          </div>
+        </div>
+      </nav>
+
+      {/* Operator Footer + Sign Out Action */}
+      <div className="mt-auto px-3.5 py-3 border-t border-[var(--border-hairline)] flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[var(--text-primary)] font-mono text-[11px] font-medium flex items-center justify-center shrink-0">
+            {initials}
+          </div>
           <div className="min-w-0">
-            <span className="text-sm font-bold text-gray-900 dark:text-zinc-100 block truncate">{username}</span>
-            <span className="text-[10px] text-emerald-500 font-semibold flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Operator
+            <span className="text-[12px] font-medium text-[var(--text-primary)] block truncate">
+              {username}
+            </span>
+            <span className="text-[11px] text-[var(--text-muted)] flex items-center gap-1.5">
+              <StatusDot variant="live" />
+              <span>On Duty</span>
             </span>
           </div>
         </div>
-        <div className="flex items-center gap-1 text-gray-400 dark:text-zinc-500">
-          <button
+
+        {onLogout && (
+          <motion.button
             type="button"
-            onClick={toggleDarkMode}
-            className="w-7 h-7 bg-gray-100 dark:bg-white/5 rounded-lg flex items-center justify-center hover:bg-gray-200 dark:hover:bg-white/10 cursor-pointer transition-colors"
-            title="Toggle Dark Mode"
-            aria-label="Toggle Dark Mode"
+            whileTap={{ scale: 0.94 }}
+            transition={{ duration: 0.12 }}
+            onClick={onLogout}
+            className="w-8 h-8 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--status-alert)] hover:border-[#FF453A]/30 hover:bg-[#FF453A]/[0.06] flex items-center justify-center cursor-pointer transition-colors shrink-0"
+            title="Sign out"
+            aria-label="Sign out"
           >
-            {isDarkMode ? (
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-300">
-                <circle cx="12" cy="12" r="5"></circle>
-                <line x1="12" y1="1" x2="12" y2="3"></line>
-                <line x1="12" y1="21" x2="12" y2="23"></line>
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                <line x1="1" y1="12" x2="3" y2="12"></line>
-                <line x1="21" y1="12" x2="23" y2="12"></line>
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-600">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-              </svg>
-            )}
-          </button>
-        </div>
+            <LogOut size={14} strokeWidth={1.75} />
+          </motion.button>
+        )}
       </div>
-    </div>
+    </aside>
   );
 });
 
+Sidebar.displayName = 'Sidebar';
 export default Sidebar;

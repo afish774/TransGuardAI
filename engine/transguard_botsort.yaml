@@ -1,0 +1,20 @@
+# TransGuard AI — Transit-Tuned BoT-SORT Tracker Configuration
+# Adds Sparse Optical-Flow Global Motion Compensation (GMC) to the Kalman filter
+# so camera shake, bus turns, and sudden braking do not cause track ID switches.
+
+tracker_type: botsort
+track_high_thresh: 0.40   # Clean first-stage association threshold
+track_low_thresh: 0.15    # Recover partially occluded persons & low-conf bags
+new_track_thresh: 0.45    # Require solid confidence before spawning a new track ID
+track_buffer: 60          # Keep lost tracks alive ~2.4s @ 25 FPS across occlusions
+match_thresh: 0.80        # IoU/motion association cost gate
+fuse_score: True          # Fuse detection score with IoU for stable tracks
+
+# Global Motion Compensation for moving/vibrating transit cameras
+gmc_method: sparseOptFlow
+
+# Optional ReID thresholds (set with_reid: True on RTX 3060+ if desired)
+proximity_thresh: 0.5
+appearance_thresh: 0.75
+with_reid: False
+model: auto

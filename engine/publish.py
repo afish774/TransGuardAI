@@ -80,6 +80,7 @@ def publisher_worker(cfg: EngineConfig, publish_queue, stop_event, health_queue)
     publisher = MediaMTXPublisher(cfg)
     backoff = 1.0
     last_health = 0.0
+    last_frame: Optional[np.ndarray] = None
     try:
         while not stop_event.is_set():
             try:
@@ -89,9 +90,14 @@ def publisher_worker(cfg: EngineConfig, publish_queue, stop_event, health_queue)
                 publish_health(health_queue, "publisher", "ONLINE")
                 while not stop_event.is_set():
                     try:
-                        frame = publish_queue.get(timeout=1.0)
+                        frame = publish_queue.get(timeout=0.5)
+                        last_frame = frame
                     except queue.Empty:
-                        continue
+                        # Write last valid frame as keepalive so MediaMTX doesn't close the pipe
+                        # during brief RTSP camera reconnects or heavy CPU frames.
+                        if last_frame is None:
+                            continue
+                        frame = last_frame
                     if not publisher.write_frame(frame):
                         raise RuntimeError("Failed writing frame to MediaMTX FFmpeg pipe")
                     now = time.monotonic()

@@ -1,6 +1,44 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple
+
+ENGINE_DEVICE = os.getenv("ENGINE_DEVICE", "auto").strip().lower()
+
+
+def resolve_compute_device() -> Tuple[str, bool, str]:
+    """Return ``(device_str, use_half, label)`` for PyTorch / Ultralytics / CLIP.
+
+    Automatically enables ``cuda:0`` + FP16 (``half=True``) when an NVIDIA CUDA
+    GPU is detected, with safe fallback to ``('cpu', False, 'CPU')``.
+    Override via ``ENGINE_DEVICE=cpu`` or ``ENGINE_DEVICE=cuda:0``.
+    """
+    requested = os.getenv("ENGINE_DEVICE", ENGINE_DEVICE).strip().lower()
+    if requested == "cpu":
+        return ("cpu", False, "CPU (forced)")
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev = requested if requested.startswith("cuda") else "cuda:0"
+            idx = int(dev.split(":")[1]) if ":" in dev and dev.split(":")[1].isdigit() else 0
+            props = torch.cuda.get_device_properties(idx)
+            vram_gb = props.total_memory / (1024 ** 3)
+            return (dev, True, f"{props.name} ({vram_gb:.1f} GB VRAM, FP16)")
+    except Exception:
+        pass
+    return ("cpu", False, "CPU")
+
+
+def default_models_for_device() -> Tuple[str, str]:
+    """Select optimal (yolo_model, pose_model) for the active hardware.
+
+    - NVIDIA CUDA GPU (Quadro T2000, RTX 3060, etc.): upgrades to ``yolo11s.pt``
+      + single-pass ``yolo11s-pose.pt`` (~1.5 GB total VRAM in FP16).
+    - CPU-only edge host: stays on lightweight ``yolov8n.pt`` + MediaPipe Pose.
+    """
+    dev, _, _ = resolve_compute_device()
+    if dev.startswith("cuda"):
+        return ("yolo11s.pt", "yolo11s-pose.pt")
+    return ("yolov8n.pt", "")
 
 CLS_PERSON = 0
 CLS_BACKPACK = 24
@@ -14,41 +52,131 @@ BAGGAGE_CLASSES = {
 
 # --- Pillar 1: over-crowd detection ---
 CROWD_PERSON_THRESHOLD = 8
-CROWD_CONSENSUS_FRAMES = 15
+CROWD_CONSENSUS_FRAMES = 20
 CROWD_RELEASE_FRAMES = 15
+YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF", "0.45"))
 
 # --- Pillar 2: unattended baggage ---
-BAGGAGE_STATIONARY_SECONDS = 10.0
-BAGGAGE_STATIONARY_PIXEL_TOL = 10.0
-BAGGAGE_PROXIMITY_RADIUS_PX = 120.0
+BAGGAGE_STATIONARY_SECONDS = 15.0
+BAGGAGE_STATIONARY_PIXEL_TOL = 14.0
+BAGGAGE_PROXIMITY_RADIUS_PX = 140.0
+
+# Baggage detection confidence floor — YOLOv8n has weaker recall for
+# handbags/backpacks than for persons.  Detections above this floor but below
+# the main model `conf` are rescued and fed to the tracker so that
+# intermittent low-confidence hits accumulate into stable tracks instead of
+# flickering and being lost.
+BAGGAGE_CONF_FLOOR = float(os.getenv("BAGGAGE_CONF_FLOOR", "0.22"))
+
+# Minimum number of frames a bag must be seen before it can trigger an alert.
+# This eliminates single-frame false positives from the lower confidence floor.
+BAGGAGE_MIN_FRAMES = int(os.getenv("BAGGAGE_MIN_FRAMES", "8"))
+
+# If a bag track disappears for fewer than this many seconds and a new
+# detection appears nearby, we re-link it to the old track so the
+# unattended timer is not reset.
+BAGGAGE_RELINK_TTL_S = 5.0
+BAGGAGE_RELINK_DIST_PX = 60.0
 
 # --- Pillar 3: fall detection ---
 FALL_VISIBILITY_THRESHOLD = 0.5
 FALL_ANGLE_THRESHOLD_DEG = 45.0
-FALL_CONFIRM_FRAMES = 5
-FALL_ASPECT_RATIO = 1.0
+FALL_CONFIRM_FRAMES = 8
+FALL_ASPECT_RATIO = 1.2
 
 # --- Pillar 4: weapon detection ---
 WEAPON_CLASS_KEYWORDS = ("gun", "pistol", "handgun", "revolver", "rifle",
                          "weapon", "knife", "blade", "firearm",
                          "grenade", "explosive", "explosion")
-WEAPON_CONF_THRESHOLD = float(os.getenv("WEAPON_CONF", "0.40"))
-WEAPON_CONFIRM_FRAMES = 5
+WEAPON_CONF_THRESHOLD = float(os.getenv("WEAPON_CONF", "0.42"))
+WEAPON_CONFIRM_FRAMES = int(os.getenv("WEAPON_CONFIRM_FRAMES", "4"))
 WEAPON_CROP_PADDING = 0.30
 WEAPON_MAX_CROPS_PER_FRAME = 6
+WEAPON_RELINK_DIST_PX = 100.0
+WEAPON_RELINK_TTL_S = 3.0
+
+# Shared Vision-Language Verifier (powers BOTH Pillar 4 Weapon & Pillar 5 Violence
+# using a single GPU FP16 model instance). Defaults to SigLIP patch16 (4x finer
+# spatial detail than CLIP patch32) with automatic CLIP fallbacks.
+VLM_VERIFIER_MODEL = os.getenv("VLM_VERIFIER_MODEL", "google/siglip-base-patch16-224").strip()
+VLM_FALLBACK_MODELS = (
+    "google/siglip-base-patch16-224",
+    "openai/clip-vit-base-patch16",
+    "openai/clip-vit-base-patch32",
+)
+# Enable Stage-2 visual violence confirmation via the shared VLM (0 extra VRAM)
+VIOLENCE_VLM_VERIFY = os.getenv("VIOLENCE_VLM_VERIFY", "1").strip().lower() not in ("0", "false", "no")
 
 # --- Pillar 5: violence detection ---
-VIOLENCE_IOU_THRESHOLD = 0.15
-VIOLENCE_WRIST_SPEED_PX_S = 320.0
-VIOLENCE_CONFIRM_FRAMES = 6
+VIOLENCE_IOU_THRESHOLD = float(os.getenv("VIOLENCE_IOU_THRESHOLD", "0.12"))
+VIOLENCE_PROXIMITY_PX = float(os.getenv("VIOLENCE_PROXIMITY_PX", "120.0"))
+VIOLENCE_WRIST_SPEED_PX_S = float(os.getenv("VIOLENCE_WRIST_SPEED_PX_S", "300.0"))
+VIOLENCE_BODY_SPEED_PX_S = float(os.getenv("VIOLENCE_BODY_SPEED_PX_S", "250.0"))
+VIOLENCE_CONFIRM_FRAMES = int(os.getenv("VIOLENCE_CONFIRM_FRAMES", "5"))
 VIOLENCE_PAIR_TTL_S = 3.0
 
 # --- Pillar 6: biometric watchlist ---
 FACE_MATCH_TOLERANCE = float(os.getenv("FACE_MATCH_TOLERANCE", "0.50"))
+# InsightFace ArcFace 512-D cosine similarity threshold (higher = stricter; 0.45 = <0.01% FAR)
+FACE_COSINE_THRESHOLD = float(os.getenv("FACE_COSINE_THRESHOLD", "0.45"))
+# Face backend preference: 'auto' (prefers InsightFace SCRFD+ArcFace, falls back to dlib)
+FACE_BACKEND_PREF = os.getenv("FACE_BACKEND", "auto").strip().lower()
+# InsightFace pack: 'auto' picks buffalo_l on >=6GB GPU (RTX 3060) or buffalo_sc on 4GB/CPU
+INSIGHTFACE_MODEL = os.getenv("INSIGHTFACE_MODEL", "auto").strip()
 FACE_RESCAN_INTERVAL_S = 1.0
-FACE_MIN_SIZE = 120
+# Faster rescan while a track has an unconfirmed (1-of-2) watchlist hit
+FACE_PENDING_RESCAN_S = 0.35
+# Minimum face box side (px). Smaller faces give near-random embeddings.
+FACE_MIN_SIZE = int(os.getenv("FACE_MIN_SIZE", "56"))
+# Minimum Laplacian variance (sharpness) of the face crop before encoding
+FACE_MIN_SHARPNESS = float(os.getenv("FACE_MIN_SHARPNESS", "30.0"))
+# A watchlist identity must be matched this many times within the window
+FACE_CONSENSUS_HITS = int(os.getenv("FACE_CONSENSUS_HITS", "2"))
+FACE_CONSENSUS_WINDOW_S = 4.0
+# Full-frame face fallback scan (expensive HOG) interval
+FACE_FULL_FRAME_INTERVAL_S = 3.0
 
-INCIDENT_COOLDOWN_S = float(os.getenv("INCIDENT_COOLDOWN_S", "15.0"))
+# --- Scene pre-processing / gating ---
+# Optional interior Region-Of-Interest polygon in normalised coords
+# "x1,y1;x2,y2;x3,y3;..." (0..1). Persons/bags whose ground point lies
+# outside are ignored (e.g. pedestrians seen through the windows).
+DETECTION_ROI = os.getenv("DETECTION_ROI", "").strip()
+# Optional '|'-separated seat-zone polygons in normalised coords where seated
+# slouching/leaning is excluded from fall detection.
+SEAT_ZONES_ROI = os.getenv("SEAT_ZONES_ROI", "").strip()
+_DEFAULT_YOLO_MODEL, _DEFAULT_POSE_MODEL = default_models_for_device()
+# Optional YOLO-pose model path (e.g. yolo11s-pose.pt) to replace MediaPipe
+# with single-pass multi-person pose inference. Auto-enabled on CUDA GPUs.
+DEFAULT_YOLO_MODEL = os.getenv("YOLO_MODEL", _DEFAULT_YOLO_MODEL).strip() or _DEFAULT_YOLO_MODEL
+POSE_MODEL = os.getenv("POSE_MODEL", _DEFAULT_POSE_MODEL).strip()
+# Transit-tuned tracker config: BoT-SORT (with Sparse Optical-Flow GMC) on GPU
+# or when TRACKER_TYPE=botsort; ByteTrack on CPU (override with TRACKER_CONFIG).
+_TRACKER_TYPE = os.getenv("TRACKER_TYPE", "auto").strip().lower()
+_ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BOTSORT_CFG = os.path.join(_ENGINE_DIR, "transguard_botsort.yaml")
+_BYTETRACK_CFG = os.path.join(_ENGINE_DIR, "transguard_bytetrack.yaml")
+_DEV_STR, _, _ = resolve_compute_device()
+if _TRACKER_TYPE == "botsort" or (_TRACKER_TYPE == "auto" and _DEV_STR.startswith("cuda")):
+    _DEFAULT_TRACKER = _BOTSORT_CFG if os.path.exists(_BOTSORT_CFG) else _BYTETRACK_CFG
+else:
+    _DEFAULT_TRACKER = _BYTETRACK_CFG if os.path.exists(_BYTETRACK_CFG) else "bytetrack.yaml"
+TRACKER_CONFIG = os.getenv("TRACKER_CONFIG", _DEFAULT_TRACKER)
+# Apply CLAHE contrast enhancement when mean luminance falls below this
+LOW_LIGHT_LUMA = float(os.getenv("LOW_LIGHT_LUMA", "65"))
+# Skip AI on frames that are corrupted / blank (grey/green H.264 glitch)
+CORRUPT_FRAME_MIN_STD = 4.0
+# Person detection confidence (bags use BAGGAGE_CONF_FLOOR in the same pass)
+PERSON_CONF = float(os.getenv("PERSON_CONF", "0.35"))
+
+# --- Vehicle motion compensation ---
+# Common-mode passenger motion above this (px/s @720p) = bus jolt/braking
+JOLT_COMMON_MODE_PX_S = 140.0
+# Background (camera-shake) flow above this (px/s @720p) = vibration jolt
+JOLT_CAMERA_SHAKE_PX_S = 90.0
+# Suppression window after a jolt is detected (seconds)
+JOLT_HOLD_S = 1.5
+
+INCIDENT_COOLDOWN_S = float(os.getenv("INCIDENT_COOLDOWN_S", "30.0"))
 POSE_MAX_PERSONS_PER_FRAME = 4
 
 FRAME_QUEUE_SIZE = 2
@@ -70,9 +198,10 @@ class EngineConfig:
     width: int = 1280
     height: int = 720
     fps: int = 25
-    yolo_model: str = "yolov8n.pt"
+    yolo_model: str = DEFAULT_YOLO_MODEL
+    pose_model: str = POSE_MODEL
     ffmpeg_bin: str = "ffmpeg"
-    conf: float = 0.30
+    conf: float = YOLO_CONF_THRESHOLD
     mediamtx_rtsp_url: str = "rtsp://127.0.0.1:8554"
     weapon_model: str = "yolov8n-weapons.pt"
     weapon_conf: float = WEAPON_CONF_THRESHOLD
@@ -89,3 +218,13 @@ class EngineConfig:
             if cleaned.lower().startswith("rstp://"):
                 cleaned = "rtsp://" + cleaned[7:]
             self.rtsp_url = cleaned
+
+        for name, value in (("conf", self.conf), ("weapon_conf", self.weapon_conf)):
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must be greater than 0 and at most 1")
+        if not 0.0 <= self.face_tolerance <= 1.0:
+            raise ValueError("face_tolerance must be between 0 and 1")
+        if self.width < 1 or self.height < 1 or self.fps < 1:
+            raise ValueError("width, height, and fps must be positive integers")
+        if self.crowd_threshold < 1 or self.crowd_frames < 1:
+            raise ValueError("crowd_threshold and crowd_frames must be positive integers")

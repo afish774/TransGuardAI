@@ -1,29 +1,33 @@
 # ==========================================
-# TRANS GUARD AI — Render Deployment Blueprint
+# TRANS GUARD AI — Render Backend Blueprint (Free Tier)
 # ==========================================
-# Deploy with: Connect this repo to Render and it will auto-detect this file.
-# Or manually: https://render.com/docs/blueprint-spec
+# Connect https://github.com/afish774/TransGuardAI to Render -> Blueprints
+# Frontend is deployed separately on Vercel (set VITE_BACKEND_URL to this service URL).
 
 services:
   - type: web
     name: transguard-backend
     runtime: node
     plan: free
-    buildCommand: npm install && cd frontend && npm install && npm run build
+    buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/health
     envVars:
       - key: MONGO_URI
-        sync: false  # Set manually in Render dashboard (use MongoDB Atlas free tier)
+        sync: false  # Set manually in Render dashboard (MongoDB Atlas free M0 cluster)
       - key: JWT_SECRET
         generateValue: true
       - key: DEFAULT_EDGE_API_KEY
-        sync: false  # Set manually to match your .env.edge EDGE_API_KEY
+        sync: false  # Must match your edge node EDGE_API_KEY
       - key: DEFAULT_ADMIN_PASSWORD
-        sync: false  # Set a strong admin password
+        sync: false  # Set a strong operator admin password
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 5000
       - key: CORS_ORIGINS
-        sync: false  # Set to your frontend domain, e.g. https://transguard.onrender.com
+        sync: false  # Set to your Vercel frontend URL, e.g. https://transguard-ai.vercel.app
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # Optional: Telegram bot token for SOS/alert dispatch
+      - key: TELEGRAM_CHAT_ID
+        sync: false  # Optional: Telegram chat/group ID

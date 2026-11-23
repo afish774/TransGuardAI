@@ -12,26 +12,51 @@ from engine.config import EngineConfig, MAX_PENDING_INCIDENTS, WATCHLIST_SYNC_SE
 from engine.utils.queues import put_latest, publish_health
 from engine.utils.logging import configure_worker_logging, log
 
-def fetch_watchlist(session: requests.Session, cfg: EngineConfig) -> List[Dict[str, object]]:
+def fetch_watchlist_manifest(session: requests.Session, cfg: EngineConfig) -> List[Dict[str, str]]:
+    """Fetch lightweight watchlist metadata (name + 1..10 image URLs per person) without downloading images."""
     response = session.get(
         f"{cfg.backend_url}/api/watchlist",
         headers={"x-edge-api-key": cfg.api_key},
         timeout=HTTP_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
-    targets: List[Dict[str, object]] = []
+    manifest: List[Dict[str, str]] = []
     for target in response.json():
-        url = target.get("url") or target.get("reference_image_url")
-        if not url:
-            continue
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = f"{cfg.backend_url.rstrip('/')}/{str(url).lstrip('/')}"
+        raw_urls = target.get("urls") or target.get("reference_image_urls")
+        if isinstance(raw_urls, list) and len(raw_urls) > 0:
+            url_list = [u for u in raw_urls if u]
+        else:
+            single = target.get("url") or target.get("reference_image_url")
+            url_list = [single] if single else []
+
+        target_id = str(target.get("_id") or target.get("id") or "")
+        target_name = str(target.get("name", "unknown"))
+        for idx, url in enumerate(url_list[:10]):
+            full_url = str(url)
+            if not full_url.startswith("http://") and not full_url.startswith("https://"):
+                full_url = f"{cfg.backend_url.rstrip('/')}/{full_url.lstrip('/')}"
+            manifest.append({
+                "id": f"{target_id}_{idx}",
+                "name": target_name,
+                "url": full_url,
+            })
+    return manifest
+
+
+def fetch_watchlist(
+    session: requests.Session,
+    cfg: EngineConfig,
+    manifest: List[Dict[str, str]] = None,
+) -> List[Dict[str, object]]:
+    items = manifest if manifest is not None else fetch_watchlist_manifest(session, cfg)
+    targets: List[Dict[str, object]] = []
+    for item in items:
         try:
-            image_response = session.get(url, timeout=HTTP_TIMEOUT_SECONDS)
+            image_response = session.get(item["url"], timeout=HTTP_TIMEOUT_SECONDS)
             image_response.raise_for_status()
-            targets.append({"name": target["name"], "image": image_response.content})
+            targets.append({"name": item["name"], "image": image_response.content})
         except Exception as exc:
-            log.warning("Failed to fetch image for watchlist target %s: %s", target.get("name"), exc)
+            log.warning("Failed to fetch image for watchlist target %s: %s", item.get("name"), exc)
     return targets
 
 def sign_request_headers(api_key: str, body_str: str = "") -> Dict[str, str]:
@@ -67,6 +92,7 @@ def telemetry_worker(
     base_headers = {"x-edge-api-key": cfg.api_key}
     pending: deque = deque(maxlen=MAX_PENDING_INCIDENTS)
     next_watchlist_sync = 0.0
+    last_watchlist_fingerprint = None
     next_edge_heartbeat = 0.0
     next_incident_attempt = 0.0
     incident_backoff = 1.0
@@ -82,9 +108,18 @@ def telemetry_worker(
 
             if now >= next_watchlist_sync:
                 from engine.detectors.watchlist import FACE_BACKEND
-                if FACE_BACKEND == "face_recognition":
+                if FACE_BACKEND is not None:
                     try:
-                        put_latest(control_queue, {"type": "watchlist", "targets": fetch_watchlist(session, cfg)})
+                        manifest = fetch_watchlist_manifest(session, cfg)
+                        fingerprint = hashlib.sha256(
+                            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                        # Only download & re-encode watchlist faces when the roster actually changes!
+                        # Prevents freezing inference for 5-10s every 30 seconds on CPU.
+                        if fingerprint != last_watchlist_fingerprint:
+                            targets = fetch_watchlist(session, cfg, manifest=manifest)
+                            put_latest(control_queue, {"type": "watchlist", "targets": targets})
+                            last_watchlist_fingerprint = fingerprint
                     except Exception as exc:
                         log.warning("Watchlist sync failed: %s", exc)
                 next_watchlist_sync = now + WATCHLIST_SYNC_SECONDS

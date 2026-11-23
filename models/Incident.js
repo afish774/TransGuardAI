@@ -13,7 +13,9 @@ const incidentSchema = new mongoose.Schema({
   evidence_image_url: { type: String },
   confidence: { type: Number },
   metadata: { type: mongoose.Schema.Types.Mixed },
-  status: { type: String, enum: ['NEW', 'REVIEWED', 'DISMISSED'], default: 'NEW', index: true }
+  status: { type: String, enum: ['NEW', 'REVIEWED', 'DISMISSED'], default: 'NEW', index: true },
+  reviewed_by: { type: String, default: null },
+  reviewed_at: { type: Date, default: null }
 });
 
 // Compound index for common dashboard queries (newest incidents, filtered by camera)

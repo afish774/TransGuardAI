@@ -28,6 +28,7 @@ const User = require('./models/User');
 // Services
 const { IncidentIngestionQueue } = require('./services/IncidentQueue');
 const { startOfflineDetector } = require('./services/offlineDetector');
+const { verifyTelegramBot, startTelegramSubscriberService, stopTelegramSubscriberService } = require('./utils/telegram');
 
 // Route factories
 const createAlertsRouter = require('./routes/alerts');
@@ -40,6 +41,7 @@ const authRouter = require('./routes/auth');
 // APP + SERVER SETUP
 // ==========================================
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 const CORS_ORIGINS = process.env.CORS_ORIGINS
@@ -47,13 +49,17 @@ const CORS_ORIGINS = process.env.CORS_ORIGINS
   : null;
 
 const corsOptions = {
-  origin: CORS_ORIGINS && CORS_ORIGINS.length > 0 ? CORS_ORIGINS : '*',
+  origin: CORS_ORIGINS && CORS_ORIGINS.length > 0 ? CORS_ORIGINS : true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-edge-api-key', 'x-edge-signature', 'x-edge-timestamp'],
   credentials: true,
 };
 
-const io = new Server(server, { cors: corsOptions, pingTimeout: 60000, transports: ['websocket'] });
+const io = new Server(server, {
+  cors: corsOptions,
+  pingTimeout: 60000,
+  transports: ['websocket', 'polling'],
+});
 
 // ==========================================
 // CONFIGURATION
@@ -127,13 +133,14 @@ const watchlistStorage = multer.diskStorage({
   filename: (req, file, callback) => {
     const extension = path.extname(file.originalname) || '.jpg';
     const safeName = (req.body.name || 'unknown').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    callback(null, `${safeName}_${Date.now()}${extension}`);
+    const uniqueSuffix = crypto.randomUUID().slice(0, 6);
+    callback(null, `${safeName}_${Date.now()}_${uniqueSuffix}${extension}`);
   },
 });
 
 const watchlistUpload = multer({
   storage: watchlistStorage,
-  limits: { fileSize: MAX_EVIDENCE_BYTES, files: 1, fields: 10, fieldSize: 10 * 1024 },
+  limits: { fileSize: MAX_EVIDENCE_BYTES, files: 3, fields: 10, fieldSize: 10 * 1024 },
   fileFilter: imageFileFilter,
 });
 
@@ -219,8 +226,13 @@ io.on('connection', async (socket) => {
     for (const node of nodes) {
       for (const camera of node.cameras || []) {
         activeCameras.push({
-          camera_id: camera.camera_id, node_id: node.node_id,
-          status: camera.status, fps: camera.fps, last_heartbeat: camera.last_heartbeat,
+          camera_id: camera.camera_id,
+          vehicle_id: camera.vehicle_id,
+          camera_position: camera.camera_position,
+          node_id: node.node_id,
+          status: camera.status,
+          fps: camera.fps,
+          last_heartbeat: camera.last_heartbeat,
         });
       }
     }
@@ -312,6 +324,7 @@ async function gracefulShutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   log.info('Shutdown signal received (%s). Closing gracefully...', signal);
+  stopTelegramSubscriberService();
   server.close(() => log.info('HTTP server closed'));
   clearInterval(offlineCheckInterval);
   for (const [cameraId, proc] of activeEdgeNodes) {
@@ -345,6 +358,9 @@ if (require.main === module) {
     log.info('Trans Guard AI backend running on port %d', PORT);
     log.info('Architecture: routes/ + services/ decomposition');
     log.info('Security: Helmet=%s, CORS=%s, bcrypt auth, hashed API keys', 'enabled', CORS_ORIGINS ? CORS_ORIGINS.join(',') : 'open (dev)');
+    verifyTelegramBot().then((ok) => {
+      if (ok) startTelegramSubscriberService();
+    });
   });
 }
 

@@ -1,5 +1,5 @@
 # =====================================================================
-# TransGuard AI — Native / Custom Windows Launcher (No Docker Required)
+# TransGuard AI - Native / Custom Windows Launcher (No Docker Required)
 # =====================================================================
 
 $ErrorActionPreference = "Continue"
@@ -8,7 +8,7 @@ Set-Location $RootPath
 
 Write-Host ""
 Write-Host "=====================================================================" -ForegroundColor Cyan
-Write-Host "   TRANS GUARD AI — Native Launcher (Custom Windows Environment)" -ForegroundColor Cyan
+Write-Host "   TRANS GUARD AI - Native Launcher (Custom Windows Environment)" -ForegroundColor Cyan
 Write-Host "=====================================================================" -ForegroundColor Cyan
 Write-Host ""
 

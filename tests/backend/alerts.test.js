@@ -126,6 +126,34 @@ describe('PATCH /api/alerts/:id/acknowledge', () => {
       .expect(200);
 
     expect(res.body.status).toBe('REVIEWED');
+    expect(res.body.reviewed_by).toBeTruthy();
+    expect(res.body.reviewed_at).toBeTruthy();
+  });
+
+  it('should allow validator to reject (DISMISSED) an incident and export Excel/CSV logs', async () => {
+    const res = await request
+      .patch(`/api/alerts/${incidentId}/acknowledge`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'DISMISSED' })
+      .expect(200);
+
+    expect(res.body.status).toBe('DISMISSED');
+    expect(res.body.reviewed_by).toBeTruthy();
+
+    const csvRes = await request
+      .get('/api/alerts/export?format=csv')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+
+    expect(csvRes.text).toContain('Validator Decision');
+    expect(csvRes.text).toContain('VALIDATOR REJECTED');
+
+    const xlsRes = await request
+      .get('/api/alerts/export?format=xls')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+
+    expect(xlsRes.text).toContain('VALIDATOR REJECTED');
   });
 
   it('should return 404 for a nonexistent incident', async () => {

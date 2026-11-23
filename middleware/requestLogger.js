@@ -26,16 +26,26 @@ function requestLogger(req, res, next) {
     const durationMs = Number(durationNs) / 1e6;
 
     const statusCode = res.statusCode;
-    const logLevel = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info';
+    const url = req.originalUrl || '';
+    const isQuietPoll =
+      statusCode < 400 &&
+      (url.startsWith('/api/alerts/telemetry') ||
+        url.startsWith('/api/alerts/command') ||
+        url.startsWith('/api/edge/heartbeat') ||
+        url.startsWith('/api/health'));
 
-    log[logLevel](
-      '%s %s %d %sms [%s]',
-      req.method,
-      req.originalUrl,
-      statusCode,
-      durationMs.toFixed(1),
-      requestId,
-    );
+    if (!isQuietPoll) {
+      const logLevel = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info';
+
+      log[logLevel](
+        '%s %s %d %sms [%s]',
+        req.method,
+        req.originalUrl,
+        statusCode,
+        durationMs.toFixed(1),
+        requestId,
+      );
+    }
 
     originalEnd.apply(this, args);
   };

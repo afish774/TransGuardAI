@@ -53,6 +53,8 @@ const registerSchema = Joi.object({
 
 const heartbeatSchema = Joi.object({
   camera_id: Joi.string().trim().min(1).max(64).required(),
+  vehicle_id: Joi.string().trim().min(1).max(64).pattern(/^[A-Za-z0-9_-]+$/).optional(),
+  camera_position: Joi.string().trim().max(64).allow('').optional(),
   status: Joi.string().valid('ONLINE', 'OFFLINE').default('ONLINE'),
   fps: Joi.number().min(0).max(1000).default(0),
   capture_fps: Joi.number().min(0).max(1000).optional(),
@@ -64,6 +66,11 @@ const provisionSchema = Joi.object({
     .messages({
       'string.pattern.base': 'camera_id may only contain letters, numbers, underscores, and hyphens.',
     }),
+  vehicle_id: Joi.string().trim().min(1).max(64).pattern(/^[A-Za-z0-9_-]+$/).optional()
+    .messages({
+      'string.pattern.base': 'vehicle_id may only contain letters, numbers, underscores, and hyphens.',
+    }),
+  camera_position: Joi.string().trim().max(64).allow('').optional(),
   rtsp_url: Joi.alternatives().try(
     Joi.string().trim().uri({ scheme: ['rtsp', 'rtsps', 'http', 'https'] }),
     Joi.string().trim().pattern(/^\d+$/),

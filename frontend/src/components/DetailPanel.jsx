@@ -1,320 +1,319 @@
 import React, { memo, useState, useEffect } from 'react';
-import { ShieldCheck, X, Eye, Camera, Check, ShieldAlert, Cpu, Trash2, AlertTriangle } from 'lucide-react';
-import { getEnrichedData, getSeverityStyles } from '../utils/alertUtils';
+import { AnimatePresence, motion } from 'framer-motion';
+import { X, Camera, Check, Trash2, ExternalLink, MapPin } from 'lucide-react';
+import { getEnrichedData } from '../utils/alertUtils';
 import { API_BASE_URL } from '../config';
+import {
+  SPRING,
+  StatusDot,
+  SegmentedControl,
+  TelemetryRow,
+  PrimaryButton,
+  SecondaryButton,
+} from './ui/LuxuryPrimitives';
 
-const DetailPanel = memo(({ alert: rawAlert, onClose, onDeleteAlert }) => {
+const DetailPanel = memo(({ alert: rawAlert, onClose, onDeleteAlert, onAcknowledgeAlert }) => {
   const [activeTab, setActiveTab] = useState('Overview');
-  const [acknowledged, setAcknowledged] = useState(false);
-  const [watchlistDecision, setWatchlistDecision] = useState(null); // 'confirmed' | 'dismissed'
+  const [acknowledged, setAcknowledged] = useState(rawAlert?.status === 'REVIEWED');
+  const [rejected, setRejected] = useState(rawAlert?.status === 'DISMISSED');
+  const [isAcknowledging, setIsAcknowledging] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     setConfirmDelete(false);
     setIsDeleting(false);
-    setAcknowledged(false);
-    setWatchlistDecision(null);
-  }, [rawAlert?.id, rawAlert?._id]);
+    setAcknowledged(rawAlert?.status === 'REVIEWED');
+    setRejected(rawAlert?.status === 'DISMISSED');
+    setIsAcknowledging(false);
+  }, [rawAlert?.id, rawAlert?._id, rawAlert?.status]);
 
-  if (!rawAlert) {
-    return (
-      <div className="absolute top-4 right-4 bottom-4 w-[400px] bg-white dark:bg-zinc-950/80 dark:backdrop-blur-xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.6)] dark:ring-1 dark:ring-white/10 rounded-xl flex flex-col items-center justify-center z-10 border border-gray-100 dark:border-white/5">
-        <ShieldCheck size={48} className="text-gray-200 dark:text-zinc-700 mb-4" />
-        <h3 className="text-gray-400 dark:text-zinc-500 font-medium text-sm">Select an incident to view details</h3>
-      </div>
-    );
-  }
+  // Allow closing the inspector via Escape key to return to full map view
+  useEffect(() => {
+    if (!rawAlert) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') onClose?.();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [rawAlert, onClose]);
 
-  const alert = getEnrichedData(rawAlert);
-  const severityStyle = getSeverityStyles(alert.incident_info.severity);
-  const evidenceSrc = alert.evidence_image_url
-    ? (alert.evidence_image_url.startsWith('/') ? `${API_BASE_URL}${alert.evidence_image_url}` : alert.evidence_image_url)
-    : alert.evidence_image_base64
-    ? `data:image/jpeg;base64,${alert.evidence_image_base64}`
+  const alert = rawAlert ? getEnrichedData(rawAlert) : null;
+  const evidenceSrc = alert
+    ? alert.evidence_image_url
+      ? alert.evidence_image_url.startsWith('/')
+        ? `${API_BASE_URL}${alert.evidence_image_url}`
+        : alert.evidence_image_url
+      : alert.evidence_image_base64
+      ? `data:image/jpeg;base64,${alert.evidence_image_base64}`
+      : null
     : null;
 
-  return (
-    <div
-      className="hidden lg:flex absolute top-4 bottom-4 right-4 w-[420px] bg-white/95 dark:bg-zinc-900/90 backdrop-blur-xl rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.6)] dark:ring-1 dark:ring-white/10 border border-gray-200/50 dark:border-white/10 flex-col z-[1000] overflow-hidden"
-      style={{ animation: 'detail-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards' }}
-    >
-      {/* Severity accent bar */}
-      <div className={`h-1 w-full shrink-0 ${severityStyle.bar}`} />
-      <style>{`
-        @keyframes detail-slide-in {
-          0% { opacity: 0; transform: translateX(30px); }
-          100% { opacity: 1; transform: translateX(0); }
-        }
-      `}</style>
-      {/* Navigation Tabs */}
-      <div className="flex items-center gap-6 px-6 pt-5 border-b border-gray-100 dark:border-white/5 shrink-0">
-        {['Overview', 'Metadata', 'Evidence'].map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            onClick={() => setActiveTab(tab)}
-            className={`pb-3 text-[13px] font-semibold transition-colors border-b-2 ${
-              activeTab === tab
-                ? 'text-gray-900 dark:text-zinc-100 border-indigo-600 dark:border-indigo-500'
-                : 'text-gray-400 dark:text-zinc-500 border-transparent hover:text-gray-900 dark:hover:text-white'
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-        <button
-          type="button"
-          onClick={onClose}
-          className="ml-auto mb-3 p-1.5 rounded-lg text-gray-400 dark:text-zinc-500 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-white transition-colors"
-          aria-label="Close incident details"
-        >
-          <X size={18} />
-        </button>
-      </div>
+  const hasGps =
+    alert &&
+    Number.isFinite(Number(alert.gps?.lat)) &&
+    Number.isFinite(Number(alert.gps?.lon));
 
-      <div className="p-6 overflow-y-auto flex-1 custom-scrollbar">
-        {/* Title Block */}
-        <div className="flex justify-between items-start mb-6">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-[10px] font-extrabold px-2 py-0.5 rounded uppercase tracking-wider bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/30">
-                {alert.pillar}
-              </span>
-              <span className="text-xs font-semibold text-gray-400 dark:text-zinc-500">
-                {alert.timestamp ? new Date(alert.timestamp).toLocaleTimeString() : 'Live'}
-              </span>
-            </div>
-            <h2 className="text-2xl font-black text-gray-900 dark:text-zinc-100 tracking-tight">{alert.camera_id}</h2>
+  const mapsLink = hasGps
+    ? `https://www.google.com/maps?q=${Number(alert.gps.lat).toFixed(6)},${Number(
+        alert.gps.lon
+      ).toFixed(6)}`
+    : null;
+
+  const handleDecision = async (status) => {
+    if (!alert || isAcknowledging) return;
+    setIsAcknowledging(true);
+    try {
+      const ok = onAcknowledgeAlert
+        ? await onAcknowledgeAlert(alert.id || alert._id, status)
+        : true;
+      if (ok) {
+        setAcknowledged(status === 'REVIEWED');
+        setRejected(status === 'DISMISSED');
+      }
+    } finally {
+      setIsAcknowledging(false);
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {rawAlert && alert && (
+        <motion.aside
+          key={alert.id || alert._id}
+          initial={{ opacity: 0, x: 24, scale: 0.99 }}
+          animate={{ opacity: 1, x: 0, scale: 1 }}
+          exit={{ opacity: 0, x: 24, scale: 0.99 }}
+          transition={SPRING}
+          aria-label="Incident Details"
+          className="flex absolute inset-3 sm:inset-auto sm:top-3.5 sm:bottom-3.5 sm:right-3.5 sm:w-[386px] luxury-panel-glass rounded-2xl flex-col z-[1001] overflow-hidden"
+        >
+          {/* Top Bar */}
+          <div className="px-4 py-3 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2 shrink-0">
+            <SegmentedControl
+              layoutId="detail-inspector-tabs"
+              value={activeTab}
+              onChange={setActiveTab}
+              options={[
+                { value: 'Overview', label: 'Overview' },
+                { value: 'Metadata', label: 'Details' },
+                { value: 'Evidence', label: 'Frame' },
+              ]}
+            />
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+              aria-label="Close incident details"
+              title="Close inspector (Esc)"
+            >
+              <X size={15} strokeWidth={1.75} />
+            </button>
           </div>
 
-        </div>
-
-        {/* Tab 1: Overview */}
-        {activeTab === 'Overview' && (
-          <>
-            {/* Primary Metrics Grid */}
-            <div className="grid grid-cols-[130px_1fr] gap-y-3.5 text-[13px] mb-6">
-              <div className="text-gray-400 dark:text-zinc-500 font-medium">Detection Pillar</div>
-              <div className="text-gray-900 dark:text-zinc-100 font-bold">{alert.incident_info.label}</div>
-
-              <div className="text-gray-400 dark:text-zinc-500 font-medium">Edge Sensor</div>
-              <div className="text-gray-900 dark:text-zinc-100 font-mono font-medium">{alert.camera_id} (RTSP/WebRTC)</div>
-
-              <div className="text-gray-400 dark:text-zinc-500 font-medium">Confidence</div>
-              <div className="text-gray-900 dark:text-zinc-100 font-semibold">{alert.confidence}%</div>
-
-              <div className="text-gray-400 dark:text-zinc-500 font-medium">Spatial Anchor</div>
-              <div className="text-gray-900 dark:text-zinc-100 font-medium">
-                {Number.isFinite(alert.gps?.lat) && Number.isFinite(alert.gps?.lon)
-                  ? `${alert.gps.lat.toFixed(4)}, ${alert.gps.lon.toFixed(4)}`
-                  : 'Calibrated Vision Zone'}
+          <div className="p-5 overflow-y-auto flex-1 custom-scrollbar space-y-5">
+            {/* Title Header */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--text-muted)]">
+                  <StatusDot
+                    variant={
+                      acknowledged
+                        ? 'live'
+                        : rejected
+                        ? 'muted'
+                        : alert.incident_info.severity === 'CRITICAL'
+                        ? 'alert'
+                        : 'standby'
+                    }
+                  />
+                  <span>{alert.incident_info.severity}</span>
+                </span>
+                <span className="font-mono tabular-nums text-[11px] text-[var(--text-muted)]">
+                  {alert.timestamp
+                    ? new Date(alert.timestamp).toLocaleTimeString([], { hour12: false })
+                    : 'Live'}
+                </span>
               </div>
-
-              <div className="text-gray-400 dark:text-zinc-500 font-medium">Operator Status</div>
-              <div className="font-semibold">
-                {acknowledged ? (
-                  <span className="text-emerald-500 flex items-center gap-1">
-                    <Check size={14} /> Acknowledged by Operator
-                  </span>
-                ) : (
-                  <span className="text-amber-500">Unacknowledged Alert</span>
+              <h2 className="text-[18px] font-semibold tracking-[-0.025em] text-[var(--text-primary)] leading-snug">
+                {alert.incident_info.label}
+              </h2>
+              <div className="mt-1 flex items-center justify-between">
+                <p className="font-mono text-[12px] text-[var(--text-secondary)]">
+                  {alert.camera_id}
+                </p>
+                {mapsLink && (
+                  <a
+                    href={mapsLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] text-[#0A84FF] hover:underline"
+                  >
+                    <MapPin size={11} strokeWidth={1.75} />
+                    <span>Google Maps</span>
+                    <ExternalLink size={10} strokeWidth={1.75} />
+                  </a>
                 )}
               </div>
             </div>
 
-            <div className="h-px bg-gray-100 dark:bg-white/5 w-full mb-6"></div>
+            {activeTab === 'Overview' && (
+              <>
+                {evidenceSrc && (
+                  <div className="rounded-xl overflow-hidden bg-black border border-[var(--border-hairline)]">
+                    <img
+                      src={evidenceSrc}
+                      alt="Incident snapshot"
+                      className="w-full object-cover max-h-40 cursor-pointer hover:opacity-95 transition-opacity"
+                      onClick={() => setActiveTab('Evidence')}
+                    />
+                  </div>
+                )}
 
-            {/* AI Incident Analysis Box */}
-            <div className="bg-gray-50 dark:bg-zinc-950/60 border border-gray-200 dark:border-white/10 rounded-xl p-4 mb-6 shadow-sm">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2 font-bold text-sm text-gray-900 dark:text-zinc-100">
-                  <ShieldAlert size={16} className={severityStyle.text} />
-                  <span>AI Verification Assessment</span>
+                <div className="rounded-xl bg-[var(--bg-surface)]/75 border border-[var(--border-hairline)] px-3.5">
+                  <TelemetryRow label="Camera" value={alert.camera_id} />
+                  <TelemetryRow
+                    label="Confidence"
+                    value={alert.confidence ? `${alert.confidence}%` : '—'}
+                  />
+                  <TelemetryRow
+                    label="Coordinates"
+                    value={
+                      hasGps
+                        ? `${Number(alert.gps.lat).toFixed(4)}, ${Number(alert.gps.lon).toFixed(4)}`
+                        : 'Pending'
+                    }
+                  />
+                  {alert.metadata?.identity && (
+                    <TelemetryRow label="Subject" value={alert.metadata.identity} mono={false} />
+                  )}
+                  <TelemetryRow
+                    label="Status"
+                    value={
+                      acknowledged
+                        ? `Accepted${rawAlert?.reviewed_by ? ` · ${rawAlert.reviewed_by}` : ''}`
+                        : rejected
+                        ? `Dismissed${rawAlert?.reviewed_by ? ` · ${rawAlert.reviewed_by}` : ''}`
+                        : 'Pending Review'
+                    }
+                    dot={acknowledged ? 'live' : rejected ? 'muted' : 'standby'}
+                    accent={acknowledged ? 'live' : rejected ? 'default' : 'standby'}
+                    mono={false}
+                  />
                 </div>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${severityStyle.text} bg-gray-100 dark:bg-white/5`}>
-                  {alert.incident_info.severity}
-                </span>
-              </div>
 
-              {alert.incident_type === 'WATCHLIST_MATCH' ? (
-                <div className="space-y-3 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500 dark:text-zinc-400">Subject Match</span>
-                    <span className="font-bold text-gray-900 dark:text-white">{alert.metadata?.identity || 'Target Identity'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500 dark:text-zinc-400">Track ID</span>
-                    <span className="font-mono text-gray-900 dark:text-white">#{alert.metadata?.trackId ?? alert.trackId ?? '—'}</span>
-                  </div>
-                  <div className="pt-2 border-t border-gray-200 dark:border-white/10">
-                    {watchlistDecision ? (
-                      <p className="text-center font-bold text-emerald-600 dark:text-emerald-400 py-1">
-                        Decision recorded: {watchlistDecision.toUpperCase()}
-                      </p>
-                    ) : (
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setWatchlistDecision('confirmed')}
-                          className="flex-1 py-1.5 px-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-colors"
-                        >
-                          Confirm Match
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setWatchlistDecision('dismissed')}
-                          className="flex-1 py-1.5 px-3 bg-white dark:bg-white/5 hover:bg-gray-100 dark:hover:bg-white/10 text-gray-700 dark:text-zinc-200 border border-gray-300 dark:border-white/15 font-bold rounded-lg text-xs transition-colors"
-                        >
-                          Dismiss Match
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3 text-xs">
-                  <p className="text-gray-600 dark:text-zinc-300 leading-relaxed">
-                    Triggered under Pillar: <strong className="text-gray-900 dark:text-white">{alert.pillar}</strong>. High-confidence edge model verification passed consensus threshold.
-                  </p>
-                  <div className="pt-1 flex flex-col gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAcknowledged(true)}
-                      disabled={acknowledged}
-                      className={`w-full py-2 px-4 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-2 ${
-                        acknowledged
-                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 cursor-default'
-                          : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-md'
-                      }`}
-                    >
-                      {acknowledged ? (
-                        <>
-                          <Check size={14} /> Incident Acknowledged
-                        </>
-                      ) : (
-                        'Acknowledge Incident'
-                      )}
-                    </button>
+                <div className="pt-1 space-y-2">
+                  <PrimaryButton
+                    onClick={() => handleDecision('REVIEWED')}
+                    disabled={acknowledged || isAcknowledging}
+                    className="w-full h-10"
+                  >
+                    <Check size={14} strokeWidth={1.75} />
+                    <span>
+                      {acknowledged
+                        ? 'Accepted & Dispatched'
+                        : isAcknowledging
+                        ? 'Updating…'
+                        : 'Approve & Sound Siren'}
+                    </span>
+                  </PrimaryButton>
 
-                    {onDeleteAlert && (
-                      <div className="space-y-1">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            if (!confirmDelete) {
-                              setConfirmDelete(true);
-                              return;
-                            }
-                            setIsDeleting(true);
-                            await onDeleteAlert(alert.id || alert._id);
-                            setIsDeleting(false);
-                            setConfirmDelete(false);
-                          }}
-                          disabled={isDeleting}
-                          className={`w-full py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 border ${
-                            confirmDelete
-                              ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-600 shadow-md animate-pulse'
-                              : 'bg-transparent hover:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30'
-                          }`}
-                        >
-                          {confirmDelete ? <AlertTriangle size={14} /> : <Trash2 size={14} />}
+                  <SecondaryButton
+                    onClick={() => handleDecision('DISMISSED')}
+                    disabled={rejected || isAcknowledging}
+                    className="w-full h-9 text-[12px]"
+                  >
+                    <X size={13} strokeWidth={1.75} />
+                    <span>{rejected ? 'Marked as False Alarm' : 'Dismiss'}</span>
+                  </SecondaryButton>
+
+                  {onDeleteAlert && (
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!confirmDelete) {
+                            setConfirmDelete(true);
+                            return;
+                          }
+                          setIsDeleting(true);
+                          await onDeleteAlert(alert.id || alert._id);
+                          setIsDeleting(false);
+                          setConfirmDelete(false);
+                        }}
+                        disabled={isDeleting}
+                        className={`w-full h-8 rounded-lg text-[12px] flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          confirmDelete
+                            ? 'bg-[#FF453A] text-white font-medium'
+                            : 'text-[var(--text-muted)] hover:text-[var(--status-alert)]'
+                        }`}
+                      >
+                        <Trash2 size={12} strokeWidth={1.75} />
+                        <span>
                           {isDeleting
-                            ? 'Deleting Incident...'
+                            ? 'Deleting…'
                             : confirmDelete
-                            ? 'Confirm: Delete Irrelevant Alert?'
-                            : 'Delete Alert (Not Relevant)'}
+                            ? 'Confirm permanent delete'
+                            : 'Delete record'}
+                        </span>
+                      </button>
+                      {confirmDelete && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDelete(false)}
+                          className="w-full text-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] mt-1 cursor-pointer"
+                        >
+                          Cancel
                         </button>
-                        {confirmDelete && (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDelete(false)}
-                            className="w-full text-center text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 py-0.5"
-                          >
-                            Cancel
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </>
-        )}
+              </>
+            )}
 
-        {/* Tab 2: Metadata */}
-        {activeTab === 'Metadata' && (
-          <div className="space-y-4 text-xs animate-in fade-in duration-150">
-            <div className="rounded-xl border border-gray-200 dark:border-white/10 p-4 bg-gray-50/50 dark:bg-zinc-950/50">
-              <div className="flex items-center gap-2 font-bold text-gray-900 dark:text-white mb-3">
-                <Cpu size={15} className="text-indigo-500" />
-                <span>Detection Sensor Parameters</span>
-              </div>
-              <pre className="p-3 bg-white dark:bg-zinc-950 rounded-lg border border-gray-200 dark:border-white/5 font-mono text-[11px] text-gray-800 dark:text-zinc-200 overflow-x-auto">
+            {activeTab === 'Metadata' && (
+              <pre className="p-4 bg-[var(--bg-elevated)] rounded-xl border border-[var(--border-hairline)] font-mono text-[11px] text-[var(--text-secondary)] overflow-x-auto leading-relaxed">
                 {JSON.stringify(
                   {
+                    id: alert.id || alert._id,
                     camera_id: alert.camera_id,
                     incident_type: alert.incident_type,
-                    pillar: alert.pillar,
                     confidence: alert.confidence,
+                    status: rawAlert?.status || 'NEW',
+                    reviewed_by: rawAlert?.reviewed_by || null,
+                    reviewed_at: rawAlert?.reviewed_at || null,
                     timestamp: alert.timestamp,
+                    gps: alert.gps || null,
                     metadata: alert.metadata || {},
-                    gps: alert.gps || null
                   },
                   null,
                   2
                 )}
               </pre>
-            </div>
-          </div>
-        )}
-
-        {/* Tab 3: Evidence */}
-        {activeTab === 'Evidence' && (
-          <div className="space-y-4 animate-in fade-in duration-150">
-            {evidenceSrc ? (
-              <div>
-                <div className="rounded-xl overflow-hidden bg-black border border-gray-200 dark:border-white/10 shadow-lg relative group">
-                  <img src={evidenceSrc} alt="Incident evidence snapshot" className="w-full object-contain max-h-[300px]" />
-                  <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/70 text-[10px] font-mono text-white font-bold">
-                    EVIDENCE FRAME
-                  </div>
-                </div>
-                <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-2 text-center">
-                  Tamper-evident frame snapshot captured at inference timestamp.
-                </p>
-              </div>
-            ) : (
-              <div className="rounded-xl border border-dashed border-gray-300 dark:border-white/10 p-12 text-center text-gray-400 dark:text-zinc-500">
-                <Camera size={32} className="mx-auto mb-2 opacity-50" />
-                <p className="text-xs font-semibold">No visual evidence attached to this incident</p>
-              </div>
             )}
-          </div>
-        )}
 
-        {/* Persistent Evidence Preview on Overview tab */}
-        {activeTab === 'Overview' && evidenceSrc && (
-          <div className="mt-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-gray-700 dark:text-zinc-300">Evidence Frame</span>
-              <button
-                type="button"
-                onClick={() => setActiveTab('Evidence')}
-                className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
-              >
-                <Eye size={12} /> Expand View
-              </button>
-            </div>
-            <div className="rounded-xl overflow-hidden bg-black border border-gray-200 dark:border-white/10 shadow-sm relative">
-              <img src={evidenceSrc} alt="Evidence snapshot" className="w-full object-cover max-h-48" />
-            </div>
+            {activeTab === 'Evidence' &&
+              (evidenceSrc ? (
+                <div className="rounded-xl overflow-hidden bg-black border border-[var(--border-hairline)]">
+                  <img
+                    src={evidenceSrc}
+                    alt="Full evidence frame"
+                    className="w-full object-contain max-h-[340px]"
+                  />
+                </div>
+              ) : (
+                <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-elevated)] p-12 text-center text-[var(--text-muted)]">
+                  <Camera size={22} strokeWidth={1.5} className="mx-auto mb-2 opacity-60" />
+                  <p className="text-[12px]">No snapshot attached</p>
+                </div>
+              ))}
           </div>
-        )}
-      </div>
-    </div>
+        </motion.aside>
+      )}
+    </AnimatePresence>
   );
 });
 
+DetailPanel.displayName = 'DetailPanel';
 export default DetailPanel;

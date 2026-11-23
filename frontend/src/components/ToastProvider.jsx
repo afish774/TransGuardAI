@@ -6,47 +6,47 @@ export const useToast = () => useContext(ToastContext);
 
 const SEVERITY_CONFIG = {
   CRITICAL: {
-    bg: 'bg-red-600/95 dark:bg-red-600/90',
-    border: 'border-red-500/30',
+    bg: 'luxury-panel-glass',
+    border: 'border-[#FF453A]/35',
     icon: AlertTriangle,
-    iconColor: 'text-white',
-    textColor: 'text-white',
-    subtextColor: 'text-red-100',
-    progressBg: 'bg-red-400/40',
-    progressFill: 'bg-white/80',
+    iconBg: 'bg-[#FF453A]/15 text-[#FF453A]',
+    textColor: 'text-[var(--text-primary)]',
+    subtextColor: 'text-[var(--text-secondary)]',
+    progressBg: 'bg-[var(--border-hairline)]',
+    progressFill: 'bg-[#FF453A]',
     playAudio: true,
   },
   HIGH: {
-    bg: 'bg-orange-500/95 dark:bg-orange-600/90',
-    border: 'border-orange-400/30',
+    bg: 'luxury-panel-glass',
+    border: 'border-[#FF9F0A]/35',
     icon: AlertTriangle,
-    iconColor: 'text-white',
-    textColor: 'text-white',
-    subtextColor: 'text-orange-100',
-    progressBg: 'bg-orange-400/40',
-    progressFill: 'bg-white/80',
+    iconBg: 'bg-[#FF9F0A]/15 text-[#FF9F0A]',
+    textColor: 'text-[var(--text-primary)]',
+    subtextColor: 'text-[var(--text-secondary)]',
+    progressBg: 'bg-[var(--border-hairline)]',
+    progressFill: 'bg-[#FF9F0A]',
     playAudio: false,
   },
   MEDIUM: {
-    bg: 'bg-amber-500/95 dark:bg-amber-600/90',
-    border: 'border-amber-400/30',
+    bg: 'luxury-panel-glass',
+    border: 'border-[var(--border-hover)]',
     icon: Info,
-    iconColor: 'text-white',
-    textColor: 'text-white',
-    subtextColor: 'text-amber-100',
-    progressBg: 'bg-amber-400/40',
-    progressFill: 'bg-white/80',
+    iconBg: 'bg-[#0A84FF]/15 text-[#0A84FF]',
+    textColor: 'text-[var(--text-primary)]',
+    subtextColor: 'text-[var(--text-secondary)]',
+    progressBg: 'bg-[var(--border-hairline)]',
+    progressFill: 'bg-[#0A84FF]',
     playAudio: false,
   },
   SUCCESS: {
-    bg: 'bg-emerald-600/95 dark:bg-emerald-600/90',
+    bg: 'luxury-panel-glass',
     border: 'border-emerald-500/30',
     icon: CheckCircle,
-    iconColor: 'text-white',
-    textColor: 'text-white',
-    subtextColor: 'text-emerald-100',
-    progressBg: 'bg-emerald-400/40',
-    progressFill: 'bg-white/80',
+    iconBg: 'bg-emerald-500/15 text-[#30D158]',
+    textColor: 'text-[var(--text-primary)]',
+    subtextColor: 'text-[var(--text-secondary)]',
+    progressBg: 'bg-[var(--border-hairline)]',
+    progressFill: 'bg-[#30D158]',
     playAudio: false,
   },
 };
@@ -97,21 +97,21 @@ function Toast({ toast, onDismiss }) {
   return (
     <div
       role="alert"
-      className={`relative overflow-hidden rounded-xl border shadow-2xl backdrop-blur-sm transition-all duration-300 ease-out w-[380px] max-w-[calc(100vw-2rem)] ${config.bg} ${config.border} ${
-        exiting ? 'opacity-0 translate-x-8 scale-95' : 'opacity-100 translate-x-0 scale-100'
+      className={`relative overflow-hidden rounded-2xl border transition-all duration-300 ease-out w-[360px] max-w-[calc(100vw-1.5rem)] ${config.bg} ${config.border} ${
+        exiting ? 'opacity-0 translate-x-6 scale-[0.98]' : 'opacity-100 translate-x-0 scale-100'
       }`}
       style={{ animation: 'toast-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards' }}
     >
-      <div className="flex items-start gap-3 p-4">
-        <div className={`shrink-0 mt-0.5 ${config.iconColor}`}>
-          <Icon size={18} />
+      <div className="flex items-start gap-3 p-3.5">
+        <div className={`shrink-0 w-7 h-7 rounded-xl flex items-center justify-center ${config.iconBg}`}>
+          <Icon size={15} strokeWidth={1.75} />
         </div>
-        <div className="flex-1 min-w-0">
-          <p className={`text-sm font-bold ${config.textColor} leading-tight`}>
+        <div className="flex-1 min-w-0 pt-0.5">
+          <p className={`text-[13px] font-medium tracking-[-0.01em] ${config.textColor} leading-snug`}>
             {toast.title}
           </p>
           {toast.message && (
-            <p className={`text-xs ${config.subtextColor} mt-1 leading-relaxed line-clamp-2`}>
+            <p className={`text-[11.5px] ${config.subtextColor} mt-0.5 leading-relaxed line-clamp-2`}>
               {toast.message}
             </p>
           )}
@@ -119,15 +119,15 @@ function Toast({ toast, onDismiss }) {
         <button
           type="button"
           onClick={dismiss}
-          className="shrink-0 p-1 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+          className="shrink-0 p-1 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer"
           aria-label="Dismiss notification"
         >
-          <X size={14} />
+          <X size={13} strokeWidth={1.75} />
         </button>
       </div>
 
-      {/* Auto-dismiss progress bar */}
-      <div className={`absolute bottom-0 left-0 right-0 h-[3px] ${config.progressBg}`}>
+      {/* Auto-dismiss hairline progress bar */}
+      <div className={`absolute bottom-0 left-0 right-0 h-[2px] ${config.progressBg}`}>
         <div
           className={`h-full ${config.progressFill} rounded-r`}
           style={{
@@ -171,7 +171,7 @@ export function ToastProvider({ children }) {
 
       {/* Toast container */}
       <div
-        className="fixed top-4 right-4 z-[9999] flex flex-col gap-3 pointer-events-none"
+        className="fixed top-[60px] right-3 sm:right-4 z-[9999] flex flex-col gap-2 pointer-events-none"
         aria-live="polite"
       >
         {/* Audio toggle */}
@@ -179,7 +179,7 @@ export function ToastProvider({ children }) {
           <button
             type="button"
             onClick={toggleAudio}
-            className="self-end pointer-events-auto p-1.5 rounded-lg bg-black/40 backdrop-blur-sm text-white/60 hover:text-white hover:bg-black/60 transition-colors mb-1"
+            className="self-end pointer-events-auto p-1.5 rounded-lg luxury-panel-glass text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors mb-0.5 cursor-pointer"
             title={audioEnabled ? 'Mute alerts' : 'Unmute alerts'}
             aria-label={audioEnabled ? 'Mute alert sounds' : 'Unmute alert sounds'}
           >

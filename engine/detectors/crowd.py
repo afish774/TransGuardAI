@@ -1,20 +1,25 @@
-"""Pillar 1 – Crowd / Overcrowding Detection with Spatial Density Index.
+"""Pillar 1 – Crowd / Overcrowding Detection with Resolution-Calibrated Spatial Density.
 
 Accuracy upgrades:
-  1. Spatial Density Index – computes the ratio of people to the area they
-     occupy (persons per 10,000 px²).  Catches localized aisle jams even
-     when the total headcount is below the global threshold.
-  2. Density-based alarm – a secondary alarm fires when the density index
-     exceeds a threshold, catching bottleneck clusters.
+  1. Resolution-Calibrated Spatial Density Index – computes persons per
+     resolution-scaled 10,000 px² block so 480p, 720p, and 1080p streams
+     yield consistent density metrics.
+  2. Minimum Cluster Gate (>= 4 persons) & Higher Threshold (2.0) – prevents
+     3–4 normally seated bus passengers from triggering false aisle jams,
+     while catching genuine doorway/aisle crush bottlenecks.
+  3. Hysteresis Latch & Release – prevents alarm flapping around the threshold.
 """
 
 from typing import Optional, List, Tuple
 
 from engine.config import CROWD_PERSON_THRESHOLD, CROWD_CONSENSUS_FRAMES, CROWD_RELEASE_FRAMES
 
-# Density: persons per 10,000 px² (roughly 100x100 area)
-_DENSITY_ALARM_THRESHOLD = 0.8  # ≈ 1 person per 125x100 px block
+# Density: persons per 10,000 px² at 720p (100x100 px block).
+# 2.0 ≈ 1 person per 70x70 px — genuine shoulder-to-shoulder crowding,
+# not normal seated bus spacing (~0.5–1.2).
+_DENSITY_ALARM_THRESHOLD = 2.0
 _DENSITY_UNIT_AREA = 10_000.0
+_MIN_DENSITY_PERSONS = 4
 
 
 class CrowdDetector:
@@ -28,15 +33,21 @@ class CrowdDetector:
         self.peak = 0
         self.density_streak = 0
         self.last_density = 0.0
+        self._scale: float = 1.0
+
+    def calibrate(self, frame_h: int, ref_h: int = 720) -> None:
+        """Scale spatial density unit area quadratically for frame resolution."""
+        self._scale = max(0.25, frame_h / float(ref_h))
 
     @staticmethod
     def compute_density(
         persons: List[Tuple[int, Tuple[int, int, int, int]]],
+        scale: float = 1.0,
     ) -> float:
-        """Compute spatial density: persons per _DENSITY_UNIT_AREA px².
+        """Compute spatial density: persons per resolution-scaled 10,000 px².
 
-        Uses the convex hull area of all person centroids (approximated by
-        the bounding rectangle of all centroids) to measure the occupied area.
+        Uses the bounding rectangle of all person centroids to measure occupied
+        area, normalised by ``scale ** 2`` for resolution independence.
         """
         if len(persons) < 2:
             return 0.0
@@ -49,9 +60,9 @@ class CrowdDetector:
         min_y, max_y = min(ys), max(ys)
         span_x = max(1.0, max_x - min_x)
         span_y = max(1.0, max_y - min_y)
+        unit_area = _DENSITY_UNIT_AREA * (scale ** 2)
         area = span_x * span_y
-        density = len(persons) / (area / _DENSITY_UNIT_AREA)
-        return density
+        return len(persons) / (area / unit_area)
 
     def update(self, person_count: int,
                persons: Optional[List[Tuple[int, Tuple[int, int, int, int]]]] = None,
@@ -63,13 +74,16 @@ class CrowdDetector:
 
         Returns the peak count on first alarm, or None.
         """
-        # --- Compute spatial density ---
+        # --- Compute resolution-calibrated spatial density ---
         density = 0.0
-        if persons is not None and len(persons) >= 3:
-            density = self.compute_density(persons)
+        has_cluster = persons is not None and len(persons) >= _MIN_DENSITY_PERSONS
+        if has_cluster:
+            density = self.compute_density(persons, scale=self._scale)
             self.last_density = density
+        else:
+            self.last_density = 0.0
 
-        is_dense = density >= _DENSITY_ALARM_THRESHOLD if (persons is not None and len(persons) >= 3) else False
+        is_dense = has_cluster and (density >= _DENSITY_ALARM_THRESHOLD)
         is_over_headcount = person_count > self.threshold
         is_crowded = is_over_headcount or is_dense
 
@@ -89,7 +103,10 @@ class CrowdDetector:
                 self.active = False
                 self.peak = 0
 
-        if (not self.active) and (self.over_streak >= self.confirm_frames or self.density_streak >= self.confirm_frames):
+        if (not self.active) and (
+            self.over_streak >= self.confirm_frames
+            or self.density_streak >= self.confirm_frames
+        ):
             self.active = True
             self.peak = max(self.peak, person_count)
             return self.peak

@@ -9,8 +9,10 @@ export const getEnrichedData = (alert) => {
     'FALL_DETECTED': { severity: 'CRITICAL', label: 'FALL DETECTED' },
     'CRIME_WEAPON_DETECTED': { severity: 'CRITICAL', label: 'WEAPON DETECTED' },
     'CRIME_VIOLENCE_DETECTED': { severity: 'CRITICAL', label: 'VIOLENCE DETECTED' },
-    'ARMED_VIOLENCE': { severity: 'CRITICAL', label: 'ARMED VIOLENCE (P1)' },
-    'VIOLENT_ASSAULT_COLLAPSE': { severity: 'CRITICAL', label: 'ASSAULT & COLLAPSE (P2)' },
+    'ARMED_VIOLENCE': { severity: 'CRITICAL', label: 'ARMED VIOLENCE' },
+    'VIOLENT_ASSAULT_COLLAPSE': { severity: 'CRITICAL', label: 'ASSAULT & COLLAPSE' },
+    'DRIVER_SOS_PANIC': { severity: 'CRITICAL', label: 'DRIVER EMERGENCY SOS' },
+    'BAGGAGE_THEFT_SUSPECTED': { severity: 'CRITICAL', label: 'BAGGAGE THEFT DETECTED' },
     'OVERCROWD_DETECTED': { severity: 'HIGH', label: 'OVERCROWDING' }
   };
 
@@ -25,7 +27,7 @@ export const getEnrichedData = (alert) => {
   else if (['OVERCROWD_DETECTED', 'CONGESTION'].includes(alert.incident_type)) pillar = 'OVERCROWDING';
   else if (alert.incident_type === 'UNATTENDED_BAGGAGE') pillar = 'LOST & FOUND';
   else if (alert.incident_type === 'WATCHLIST_MATCH') pillar = 'FACE MATCH';
-  else if (['CRIME_WEAPON_DETECTED', 'CRIME_VIOLENCE_DETECTED', 'ARMED_VIOLENCE', 'VIOLENT_ASSAULT_COLLAPSE'].includes(alert.incident_type)) pillar = 'SECURITY THREAT';
+  else if (['CRIME_WEAPON_DETECTED', 'CRIME_VIOLENCE_DETECTED', 'ARMED_VIOLENCE', 'VIOLENT_ASSAULT_COLLAPSE', 'DRIVER_SOS_PANIC', 'BAGGAGE_THEFT_SUSPECTED'].includes(alert.incident_type)) pillar = 'SECURITY THREAT';
 
   // The edge contract reports confidence on a 0-100 scale, not a probability.
   const confidence = getConfidence(alert);
@@ -75,7 +77,7 @@ export const getSeverityStyles = (severity) => {
     case 'CRITICAL': return { text: 'text-red-600 dark:text-red-400', icon: 'text-red-500', bar: 'bg-red-500', dot: 'bg-red-500' };
     case 'HIGH': return { text: 'text-orange-600 dark:text-orange-400', icon: 'text-orange-500', bar: 'bg-orange-400', dot: 'bg-orange-500' };
     case 'MEDIUM': return { text: 'text-yellow-600 dark:text-yellow-400', icon: 'text-yellow-500', bar: 'bg-yellow-400', dot: 'bg-yellow-500' };
-    case 'REVIEW': return { text: 'text-purple-600 dark:text-purple-400', icon: 'text-purple-500', bar: 'bg-purple-400', dot: 'bg-purple-500' };
+    case 'REVIEW': return { text: 'text-white/[0.72]', icon: 'text-white/[0.64]', bar: 'bg-white/40', dot: 'bg-white/60' };
     default: return { text: 'text-gray-600 dark:text-zinc-300', icon: 'text-gray-500 dark:text-zinc-400', bar: 'bg-gray-400', dot: 'bg-gray-400' };
   }
 };

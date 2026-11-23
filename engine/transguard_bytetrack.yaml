@@ -1,0 +1,11 @@
+# TransGuard AI — Transit-Tuned ByteTrack Configuration
+# Tuned for bus/public-transit interiors with frequent partial occlusions,
+# poles, seated passengers, and handheld baggage.
+
+tracker_type: bytetrack
+track_high_thresh: 0.40   # Clean first-stage association threshold
+track_low_thresh: 0.15    # Recover partially occluded persons & low-conf bags
+new_track_thresh: 0.45    # Require solid confidence before spawning a new track ID
+track_buffer: 60          # Keep lost tracks alive ~2.4s @ 25 FPS across occlusions
+match_thresh: 0.80        # IoU/motion association cost gate
+fuse_score: True          # Fuse detection confidence with IoU for stable tracks

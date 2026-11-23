@@ -78,20 +78,13 @@ services:
     container_name: transguard-engine
     restart: unless-stopped
     profiles: ["full"]
+    env_file:
+      - .env.edge
     depends_on:
       backend:
         condition: service_healthy
     environment:
-      - RTSP_URL=${RTSP_URL:-rtsp://host.docker.internal:8554/cam0}
       - BACKEND_URL=http://backend:5000
-      - EDGE_API_KEY=${EDGE_API_KEY:-transguard-edge-secret-key-9042}
-      - CAMERA_ID=${CAMERA_ID:-cam0}
-      - FRAME_WIDTH=${FRAME_WIDTH:-1280}
-      - FRAME_HEIGHT=${FRAME_HEIGHT:-720}
-      - FRAME_FPS=${FRAME_FPS:-25}
-      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
-      - YOLO_CONF=${YOLO_CONF:-0.45}
-      - WEAPON_MODEL=${WEAPON_MODEL:-yolov8n-weapons.pt}
       - MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554
     ports:
       - "8554:8554"   # RTSP

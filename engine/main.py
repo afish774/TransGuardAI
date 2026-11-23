@@ -1,12 +1,23 @@
+import os
 import argparse
 import multiprocessing as mp_process
-import os
 import queue
 import signal
 import sys
 from typing import Dict
 
-from engine.config import EngineConfig, FRAME_QUEUE_SIZE, INCIDENT_QUEUE_SIZE, CONTROL_QUEUE_SIZE
+from dotenv import load_dotenv
+
+# Load the edge-specific file before importing config, since detector defaults
+# are read from the environment when engine.config is first imported.
+load_dotenv(os.getenv("EDGE_ENV_FILE", ".env.edge"), override=False)
+
+from engine.config import (
+    EngineConfig, FRAME_QUEUE_SIZE, INCIDENT_QUEUE_SIZE, CONTROL_QUEUE_SIZE,
+    YOLO_CONF_THRESHOLD, WEAPON_CONF_THRESHOLD, FACE_MATCH_TOLERANCE,
+    CROWD_PERSON_THRESHOLD, CROWD_CONSENSUS_FRAMES,
+    DEFAULT_YOLO_MODEL, POSE_MODEL,
+)
 from engine.utils.logging import log
 
 from engine.capture import capture_worker
@@ -121,17 +132,18 @@ def parse_args() -> EngineConfig:
     parser.add_argument("--width", type=int, default=int(os.getenv("FRAME_WIDTH", "1280")))
     parser.add_argument("--height", type=int, default=int(os.getenv("FRAME_HEIGHT", "720")))
     parser.add_argument("--fps", type=int, default=int(os.getenv("FRAME_FPS", "25")))
-    parser.add_argument("--model", default=os.getenv("YOLO_MODEL", "yolov8n.pt"))
+    parser.add_argument("--model", default=DEFAULT_YOLO_MODEL)
+    parser.add_argument("--pose-model", default=POSE_MODEL)
     parser.add_argument("--ffmpeg", default=os.getenv("FFMPEG_BIN", "ffmpeg"))
-    parser.add_argument("--conf", type=float, default=float(os.getenv("YOLO_CONF", "0.30")))
+    parser.add_argument("--conf", type=float, default=YOLO_CONF_THRESHOLD)
     parser.add_argument("--headless", action="store_true", help="Retained for compatibility; the engine is always headless")
     parser.add_argument("--weapon-model", default=os.getenv("WEAPON_MODEL", "yolov8n-weapons.pt"))
-    parser.add_argument("--weapon-conf", type=float, default=float(os.getenv("WEAPON_CONF", "0.20")))
-    parser.add_argument("--face-tolerance", type=float, default=float(os.getenv("FACE_MATCH_TOLERANCE", "0.60")))
+    parser.add_argument("--weapon-conf", type=float, default=WEAPON_CONF_THRESHOLD)
+    parser.add_argument("--face-tolerance", type=float, default=FACE_MATCH_TOLERANCE)
     parser.add_argument("--vehicle-id", default=os.getenv("VEHICLE_ID", "BUS_001"))
     parser.add_argument("--mediamtx-rtsp", default=os.getenv("MEDIAMTX_RTSP_URL", "rtsp://127.0.0.1:8554"))
-    parser.add_argument("--crowd-threshold", type=int, default=int(os.getenv("CROWD_THRESHOLD", "8")))
-    parser.add_argument("--crowd-frames", type=int, default=int(os.getenv("CROWD_FRAMES", "15")))
+    parser.add_argument("--crowd-threshold", type=int, default=int(os.getenv("CROWD_THRESHOLD", str(CROWD_PERSON_THRESHOLD))))
+    parser.add_argument("--crowd-frames", type=int, default=int(os.getenv("CROWD_FRAMES", str(CROWD_CONSENSUS_FRAMES))))
     parser.add_argument("--lat", type=float, default=float(os.getenv("FALLBACK_LAT", "10.5898")))
     parser.add_argument("--lon", type=float, default=float(os.getenv("FALLBACK_LON", "76.0116")))
     
@@ -145,6 +157,7 @@ def parse_args() -> EngineConfig:
         height=args.height,
         fps=args.fps,
         yolo_model=args.model,
+        pose_model=args.pose_model,
         ffmpeg_bin=args.ffmpeg,
         conf=args.conf,
         mediamtx_rtsp_url=args.mediamtx_rtsp,
