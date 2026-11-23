@@ -45,7 +45,9 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 const CORS_ORIGINS = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+  ? process.env.CORS_ORIGINS.split(',')
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter(Boolean)
   : null;
 
 const corsOptions = {
