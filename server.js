@@ -288,9 +288,22 @@ app.use('/api/edge', createControlRouter({
 // ==========================================
 // SPA FALLBACK & ERROR HANDLER
 // ==========================================
+const frontendIndexPath = path.join(__dirname, 'frontend', 'dist', 'index.html');
+const hasFrontendDist = require('fs').existsSync(frontendIndexPath);
+
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
-  return res.sendFile(path.join(__dirname, 'frontend', 'dist', 'index.html'));
+  if (hasFrontendDist) {
+    return res.sendFile(frontendIndexPath);
+  }
+  if (req.path === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
+    return res.status(200).json({
+      status: 'ok',
+      service: 'TransGuard AI Backend',
+      health: '/api/health',
+    });
+  }
+  return res.status(404).json({ error: 'Not found' });
 });
 
 app.use((error, req, res, _next) => {
