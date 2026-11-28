@@ -43,6 +43,7 @@ from engine.config import (
     WEAPON_CLASS_KEYWORDS,
     WEAPON_CROP_PADDING,
     WEAPON_MAX_CROPS_PER_FRAME,
+    yolo_precision_kwargs,
     WEAPON_CONFIRM_FRAMES,
     WEAPON_RELINK_DIST_PX,
     WEAPON_RELINK_TTL_S,
@@ -62,13 +63,13 @@ CLASS_THRESHOLDS = {
     "grenade": 0.58,
     "explosive": 0.55,
     "explosion": 0.55,
-    "gun": 0.42,
-    "pistol": 0.42,
-    "handgun": 0.42,
-    "firearm": 0.42,
-    "revolver": 0.42,
-    "rifle": 0.45,
-    "weapon": 0.42,
+    "gun": 0.48,
+    "pistol": 0.48,
+    "handgun": 0.48,
+    "firearm": 0.48,
+    "revolver": 0.48,
+    "rifle": 0.48,
+    "weapon": 0.48,
     "knife": 0.40,
     "blade": 0.40,
 }
@@ -112,6 +113,11 @@ class WeaponDetector:
         self._owns_vlm: bool = False
         self.clip = None
         self._clip_executor: Optional[ThreadPoolExecutor] = None
+        # Pose-guided async VLM hand-weapon patrol state
+        self._hand_jobs: Dict[int, Tuple[Future, Tuple[int, int, int, int]]] = {}
+        self._hand_streaks: Dict[int, Tuple[str, int, float]] = {}
+        self._hand_last_scan: Dict[int, float] = {}
+        self._hand_wrist_toggle: Dict[int, int] = {}
 
         if not weights_path:
             return
@@ -344,12 +350,190 @@ class WeaponDetector:
         return "PENDING"
 
     def _check_geometry(self, class_name: str, ww: int, wh: int) -> bool:
-        min_side = 22 * self._scale
-        if ww < min_side or wh < min_side:
+        # Allow thin elongated knife blades / pistol barrels held horizontally or vertically
+        long_side = max(ww, wh)
+        short_side = min(ww, wh)
+        if long_side < 24 * self._scale or short_side < 10 * self._scale:
+            return False
+        if (ww * wh) < 300 * (self._scale ** 2):
             return False
         if "grenade" in class_name and (ww > 300 * self._scale or wh > 300 * self._scale):
             return False
         return True
+
+    def _poll_hand_patrol(
+        self,
+        frame: np.ndarray,
+        persons: List[Tuple[int, Tuple[int, int, int, int]]],
+        landmarks_by_id: Optional[Dict[int, object]],
+        now: float,
+        sync: bool = False,
+    ) -> List[Tuple[int, str, float, Tuple[int, int, int, int]]]:
+        """Non-blocking pose-guided SigLIP hand-weapon patrol.
+
+        Catches real butcher/kitchen knives and handguns held in a passenger's
+        hands even when generic yolov8n-weapons.pt misses them, using the
+        already-loaded GPU VLM asynchronously with 2-scan temporal confirmation.
+        """
+        vlm = getattr(self, "_vlm", None)
+        if vlm is None or not vlm.available or not persons or not landmarks_by_id:
+            return []
+
+        hand_jobs: Dict[int, Tuple[Future, Tuple[int, int, int, int]]] = getattr(
+            self, "_hand_jobs", None
+        )
+        if hand_jobs is None:
+            hand_jobs = {}
+            self._hand_jobs = hand_jobs
+        hand_streaks: Dict[int, Tuple[str, int, float]] = getattr(self, "_hand_streaks", None)
+        if hand_streaks is None:
+            hand_streaks = {}
+            self._hand_streaks = hand_streaks
+        hand_last_scan: Dict[int, float] = getattr(self, "_hand_last_scan", None)
+        if hand_last_scan is None:
+            hand_last_scan = {}
+            self._hand_last_scan = hand_last_scan
+        hand_toggle: Dict[int, int] = getattr(self, "_hand_wrist_toggle", None)
+        if hand_toggle is None:
+            hand_toggle = {}
+            self._hand_wrist_toggle = hand_toggle
+
+        active_ids = {pid for pid, _ in persons}
+        patrol_hits: List[Tuple[int, str, float, Tuple[int, int, int, int]]] = []
+
+        # 1. Harvest any completed async hand-patrol jobs
+        for tid in list(hand_jobs):
+            fut, hbox = hand_jobs[tid]
+            if not fut.done():
+                continue
+            del hand_jobs[tid]
+            try:
+                verdict = fut.result()
+            except Exception:
+                verdict = None
+            if verdict is not None:
+                w_cls, w_score = verdict
+                prev = hand_streaks.get(tid)
+                if prev is not None and prev[0] == w_cls and (now - prev[2]) <= 3.5:
+                    new_streak = prev[1] + 1.0
+                else:
+                    new_streak = 1.0
+                hand_streaks[tid] = (w_cls, new_streak, now)
+                if new_streak >= 2.0:
+                    patrol_hits.append((tid, w_cls, float(w_score), hbox))
+            else:
+                # Soft decay so a single motion-blurred walking frame doesn't wipe out a real hit
+                prev = hand_streaks.get(tid)
+                if prev is not None:
+                    decayed = prev[1] - 0.5
+                    if decayed <= 0.0:
+                        hand_streaks.pop(tid, None)
+                    else:
+                        hand_streaks[tid] = (prev[0], decayed, prev[2])
+
+        # Prune stale tracks
+        for tid in list(hand_streaks):
+            if tid not in active_ids or (now - hand_streaks[tid][2]) > 3.5:
+                del hand_streaks[tid]
+        for tid in list(hand_last_scan):
+            if tid not in active_ids:
+                del hand_last_scan[tid]
+                hand_toggle.pop(tid, None)
+
+        # 2. Submit at most 1 hand crop at a time so GPU VLM never backlogs
+        if hand_jobs and not sync:
+            return patrol_hits
+
+        fh, fw = frame.shape[:2]
+        # Prioritize tracks with a pending 1-of-2 hit, then least-recently-scanned
+        ordered = sorted(
+            persons,
+            key=lambda item: (
+                0 if item[0] in hand_streaks else 1,
+                hand_last_scan.get(item[0], 0.0),
+            ),
+        )
+        for tid, _pbox in ordered:
+            pts = landmarks_by_id.get(tid)
+            if not pts:
+                continue
+            # Fast walking cadence: 0.18s idle, 0.04s rapid re-confirm on pending hit
+            cooldown = 0.04 if tid in hand_streaks else 0.18
+            if (now - hand_last_scan.get(tid, 0.0)) < cooldown:
+                continue
+
+            wrists: List[Tuple[int, int, str]] = []
+            for wname in ("LEFT_WRIST", "RIGHT_WRIST"):
+                lm = pts.get(wname)
+                if lm and lm[2] >= 0.45:
+                    wrists.append((int(lm[0]), int(lm[1]), wname))
+            if not wrists:
+                continue
+
+            if len(wrists) == 2 and dist((wrists[0][0], wrists[0][1]), (wrists[1][0], wrists[1][1])) <= 210.0 * self._scale:
+                cx = (wrists[0][0] + wrists[1][0]) // 2
+                cy = (wrists[0][1] + wrists[1][1]) // 2
+                r = int(120 * self._scale)
+            else:
+                idx = hand_toggle.get(tid, 0) % len(wrists)
+                hand_toggle[tid] = idx + 1
+                wx, wy, wname = wrists[idx]
+                cx, cy = wx, wy
+                # Project crop center slightly past wrist along ELBOW -> WRIST vector
+                # so swinging knife blades / gun barrels stay centered while walking
+                elbow_name = "LEFT_ELBOW" if wname == "LEFT_WRIST" else "RIGHT_ELBOW"
+                elbow = pts.get(elbow_name)
+                if elbow and elbow[2] >= 0.40:
+                    dx = wx - elbow[0]
+                    dy = wy - elbow[1]
+                    norm = (dx * dx + dy * dy) ** 0.5
+                    if norm >= 12.0:
+                        proj = 24.0 * self._scale
+                        cx = int(wx + (dx / norm) * proj)
+                        cy = int(wy + (dy / norm) * proj)
+                r = int(120 * self._scale)
+
+            hx1 = max(0, cx - r)
+            hy1 = max(0, cy - r)
+            hx2 = min(fw, cx + r)
+            hy2 = min(fh, cy + r)
+            if hx2 - hx1 < 36 or hy2 - hy1 < 36:
+                continue
+
+            hcrop = frame[hy1:hy2, hx1:hx2]
+            if hcrop.size == 0:
+                continue
+
+            hand_last_scan[tid] = now
+            hbox = (hx1, hy1, hx2, hy2)
+            if sync:
+                verdict = vlm.scan_hand_weapon(hcrop)
+                if verdict is not None:
+                    w_cls, w_score = verdict
+                    prev = hand_streaks.get(tid)
+                    new_streak = (
+                        prev[1] + 1.0
+                        if (prev is not None and prev[0] == w_cls and (now - prev[2]) <= 3.5)
+                        else 1.0
+                    )
+                    hand_streaks[tid] = (w_cls, new_streak, now)
+                    if new_streak >= 2.0:
+                        patrol_hits.append((tid, w_cls, float(w_score), hbox))
+                else:
+                    prev = hand_streaks.get(tid)
+                    if prev is not None:
+                        decayed = prev[1] - 0.5
+                        if decayed <= 0.0:
+                            hand_streaks.pop(tid, None)
+                        else:
+                            hand_streaks[tid] = (prev[0], decayed, prev[2])
+            else:
+                fut = vlm.submit_hand_weapon(hcrop)
+                if fut is not None:
+                    hand_jobs[tid] = (fut, hbox)
+            break
+
+        return patrol_hits
 
     def scan(
         self,
@@ -358,11 +542,15 @@ class WeaponDetector:
         landmarks_by_id: Optional[Dict[int, object]] = None,
     ) -> List[Tuple[int, str, float, Tuple[int, int, int, int]]]:
         self._frame_index += 1
-        if self.model is None:
-            return []
-
         now = time.time()
         hits: List[Tuple[int, str, float, Tuple[int, int, int, int]]] = []
+
+        # Always harvest/advance non-blocking pose-guided VLM hand patrol (~0.01ms)
+        hits.extend(self._poll_hand_patrol(frame, persons, landmarks_by_id, now))
+
+        if self.model is None:
+            return hits
+
         seen_ids = set()
 
         # Clean expired spatial streaks
@@ -371,54 +559,80 @@ class WeaponDetector:
             if now - item["last_seen"] <= WEAPON_RELINK_TTL_S
         ]
 
-        # Build deduplicated crop batch (person crops + high-confidence wrist crops)
+        # Adaptive alert-lock scan cadence:
+        # - Whenever ANY tentative weapon candidate exists (_spatial_streaks non-empty),
+        #   scan EVERY frame (stride=1) so 3-frame confirmation locks on immediately.
+        # - When the scene is completely clear, scan every 2nd frame (stride=2) to
+        #   avoid starving primary tracking/pose/violence FPS on multi-person scenes.
+        has_active_candidate = any(
+            item.get("clip_status") != "REJECT" for item in self._spatial_streaks
+        )
+        if not has_active_candidate and (self._frame_index % 2 == 0):
+            return hits
+
+        # Build wrist-expanded person crops (+ extra wrist zoom only for large close-up bodies)
         crop_items: List[Tuple[int, np.ndarray, Tuple[int, int]]] = []
+        fh, fw = frame.shape[:2]
         if persons:
             wrist_r = int(140 * self._scale)
-            min_wrist_sep = 110.0 * self._scale
+            min_wrist_sep = 160.0 * self._scale
             for track_id, person_bbox in persons[:WEAPON_MAX_CROPS_PER_FRAME]:
                 seen_ids.add(track_id)
-                crop, offset = crop_bbox(frame, person_bbox, WEAPON_CROP_PADDING)
-                if crop is not None and crop.size > 0:
-                    crop_items.append((track_id, crop, offset))
+                ex1, ey1, ex2, ey2 = person_bbox
+                visible_wrists: List[Tuple[int, int]] = []
 
-                # Add wrist-directed crops only when wrists are clearly visible
-                # and separated enough to warrant extra zoom
                 if landmarks_by_id and track_id in landmarks_by_id:
                     pts = landmarks_by_id[track_id]
                     if pts:
-                        added_wrists: List[Tuple[int, int]] = []
                         for wrist_name in ("LEFT_WRIST", "RIGHT_WRIST"):
                             lm = pts.get(wrist_name)
                             if not lm or lm[2] < 0.45:
                                 continue
                             wx, wy = int(lm[0]), int(lm[1])
-                            if any(dist((wx, wy), aw) < min_wrist_sep for aw in added_wrists):
-                                continue
-                            x1 = max(0, wx - wrist_r)
-                            y1 = max(0, wy - wrist_r)
-                            x2 = min(frame.shape[1], wx + wrist_r)
-                            y2 = min(frame.shape[0], wy + wrist_r)
-                            if x2 - x1 > 40 and y2 - y1 > 40:
-                                wcrop = frame[y1:y2, x1:x2]
-                                if wcrop.size > 0:
-                                    crop_items.append((track_id, wcrop, (x1, y1)))
-                                    added_wrists.append((wx, wy))
+                            visible_wrists.append((wx, wy))
+                            # Expand person bbox to enclose outstretched hands/weapons
+                            ex1 = min(ex1, max(0, wx - wrist_r))
+                            ey1 = min(ey1, max(0, wy - wrist_r))
+                            ex2 = max(ex2, min(fw, wx + wrist_r))
+                            ey2 = max(ey2, min(fh, wy + wrist_r))
+
+                crop, offset = crop_bbox(frame, (ex1, ey1, ex2, ey2), WEAPON_CROP_PADDING)
+                if crop is not None and crop.size > 0:
+                    crop_items.append((track_id, crop, offset))
+
+                # Only add dedicated zoomed wrist sub-crops when the expanded person crop
+                # exceeds 416px (otherwise imgsz=416 already inspects every wrist pixel at >=1:1!)
+                if crop is not None and max(crop.shape[0], crop.shape[1]) > 416 and visible_wrists:
+                    added_wrists: List[Tuple[int, int]] = []
+                    for wx, wy in visible_wrists:
+                        if any(dist((wx, wy), aw) < min_wrist_sep for aw in added_wrists):
+                            continue
+                        x1 = max(0, wx - wrist_r)
+                        y1 = max(0, wy - wrist_r)
+                        x2 = min(fw, wx + wrist_r)
+                        y2 = min(fh, wy + wrist_r)
+                        if x2 - x1 > 40 and y2 - y1 > 40:
+                            wcrop = frame[y1:y2, x1:x2]
+                            if wcrop.size > 0:
+                                crop_items.append((track_id, wcrop, (x1, y1)))
+                                added_wrists.append((wx, wy))
         else:
             seen_ids.add(-1)
             crop_items.append((-1, frame, (0, 0)))
 
-        # Batched YOLO weapon inference across all collected crops
+        # Batched YOLO weapon inference across collected crops at 416px native crop scale
         batch_results = []
         if crop_items:
             try:
                 images = [item[1] for item in crop_items]
+                crop_imgsz = 640 if (len(crop_items) == 1 and crop_items[0][0] == -1) else 416
                 batch_results = self.model.predict(
                     images,
+                    imgsz=crop_imgsz,
                     conf=self.conf,
                     device=getattr(self, "_device", "cpu"),
-                    half=getattr(self, "_use_half", False),
                     verbose=False,
+                    **yolo_precision_kwargs(getattr(self, "_use_half", False)),
                 )
             except Exception as exc:
                 log.debug("Weapon batch inference error: %s", exc)
@@ -469,8 +683,8 @@ class WeaponDetector:
                     frame,
                     conf=self.conf,
                     device=getattr(self, "_device", "cpu"),
-                    half=getattr(self, "_use_half", False),
                     verbose=False,
+                    **yolo_precision_kwargs(getattr(self, "_use_half", False)),
                 )[0]
                 if full_res.boxes is not None:
                     max_couple_px = _PERSON_COUPLING_MAX_PX * self._scale

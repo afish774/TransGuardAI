@@ -65,10 +65,13 @@ class FFmpegSource:
             "-hide_banner",
             "-loglevel", "warning",
         ]
-        if self.cfg.rtsp_url.startswith("rtsp://") or self.cfg.rtsp_url.startswith("rtsps://"):
+        is_rtsp = self.cfg.rtsp_url.startswith("rtsp://") or self.cfg.rtsp_url.startswith("rtsps://")
+        if is_rtsp:
             command.extend([
                 "-rtsp_transport", "tcp",
                 "-timeout", "5000000",
+                "-fflags", "+nobuffer+discardcorrupt",
+                "-flags", "low_delay",
             ])
         command.extend([
             "-i", self.cfg.rtsp_url,
@@ -76,9 +79,14 @@ class FFmpegSource:
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-s", f"{self.cfg.width}x{self.cfg.height}",
-            "-r", str(self.cfg.fps),
-            "pipe:1",
         ])
+        if is_rtsp:
+            # Never force CFR duplication (-r) on live RTSP streams; prevents
+            # "More than 1000 frames duplicated" aborts on Wi-Fi camera PTS jumps.
+            command.extend(["-fps_mode", "passthrough"])
+        else:
+            command.extend(["-r", str(self.cfg.fps)])
+        command.append("pipe:1")
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -135,7 +143,15 @@ class FFmpegSource:
         self.proc = None
         self.drain_thread = None
 
-def capture_worker(cfg: EngineConfig, frame_queue, stop_event, health_queue, capture_fps, last_capture_time) -> None:
+def capture_worker(
+    cfg: EngineConfig,
+    frame_queue,
+    stop_event,
+    health_queue,
+    capture_fps,
+    last_capture_time,
+    publish_queue=None,
+) -> None:
     configure_worker_logging()
     source = OpenCVWebcamSource(cfg) if cfg.rtsp_url.strip().isdigit() else FFmpegSource(cfg)
     backoff = 2.0
@@ -166,9 +182,13 @@ def capture_worker(cfg: EngineConfig, frame_queue, stop_event, health_queue, cap
                         if not first_frame_logged:
                             log.info("Capture online: receiving %dx%d frames from %s", cfg.width, cfg.height, cfg.rtsp_url)
                             first_frame_logged = True
+                        else:
+                            log.info("Capture reconnected: receiving %dx%d frames from %s", cfg.width, cfg.height, cfg.rtsp_url)
 
                     captured_at = time.time()
                     put_latest(frame_queue, (captured_at, frame))
+                    if publish_queue is not None:
+                        put_latest(publish_queue, frame)
                     last_capture_time.value = captured_at
                     frame_count += 1
                     now = time.monotonic()

@@ -16,7 +16,7 @@ from engine.config import (
     EngineConfig, FRAME_QUEUE_SIZE, INCIDENT_QUEUE_SIZE, CONTROL_QUEUE_SIZE,
     YOLO_CONF_THRESHOLD, WEAPON_CONF_THRESHOLD, FACE_MATCH_TOLERANCE,
     CROWD_PERSON_THRESHOLD, CROWD_CONSENSUS_FRAMES,
-    DEFAULT_YOLO_MODEL, POSE_MODEL,
+    DEFAULT_YOLO_MODEL, DEFAULT_WEAPON_MODEL, POSE_MODEL,
 )
 from engine.utils.logging import log
 
@@ -37,6 +37,7 @@ class TransGuardEngine:
         self.stop_event = self.context.Event()
         self.frame_queue = self.context.Queue(maxsize=FRAME_QUEUE_SIZE)
         self.publish_queue = self.context.Queue(maxsize=FRAME_QUEUE_SIZE)
+        self.overlay_queue = self.context.Queue(maxsize=FRAME_QUEUE_SIZE)
         self.incident_queue = self.context.Queue(maxsize=INCIDENT_QUEUE_SIZE)
         self.control_queue = self.context.Queue(maxsize=CONTROL_QUEUE_SIZE)
         self.health_queue = self.context.Queue(maxsize=16)
@@ -57,16 +58,18 @@ class TransGuardEngine:
         if name == "capture":
             return capture_worker, (
                 self.cfg, self.frame_queue, self.stop_event, self.health_queue,
-                self.capture_fps, self.last_capture_time,
+                self.capture_fps, self.last_capture_time, self.publish_queue,
             )
         if name == "inference":
             return inference_worker, (
                 self.cfg, self.frame_queue, self.incident_queue, self.control_queue,
-                self.stop_event, self.health_queue, self.inference_fps, self.publish_queue,
+                self.stop_event, self.health_queue, self.inference_fps, None,
+                self.overlay_queue,
             )
         if name == "publisher":
             return publisher_worker, (
                 self.cfg, self.publish_queue, self.stop_event, self.health_queue,
+                self.overlay_queue,
             )
         return telemetry_worker, (
             self.cfg, self.incident_queue, self.control_queue, self.stop_event, self.health_queue,
@@ -117,7 +120,7 @@ class TransGuardEngine:
                     log.warning("Force-terminating worker pid=%s", process.pid)
                     process.terminate()
                     process.join(timeout=3)
-            for resource in (self.frame_queue, self.publish_queue, self.incident_queue, self.control_queue, self.health_queue):
+            for resource in (self.frame_queue, self.publish_queue, self.overlay_queue, self.incident_queue, self.control_queue, self.health_queue):
                 resource.close()
                 resource.join_thread()
             log.info("Engine shutdown complete.")
@@ -137,7 +140,7 @@ def parse_args() -> EngineConfig:
     parser.add_argument("--ffmpeg", default=os.getenv("FFMPEG_BIN", "ffmpeg"))
     parser.add_argument("--conf", type=float, default=YOLO_CONF_THRESHOLD)
     parser.add_argument("--headless", action="store_true", help="Retained for compatibility; the engine is always headless")
-    parser.add_argument("--weapon-model", default=os.getenv("WEAPON_MODEL", "yolov8n-weapons.pt"))
+    parser.add_argument("--weapon-model", default=DEFAULT_WEAPON_MODEL)
     parser.add_argument("--weapon-conf", type=float, default=WEAPON_CONF_THRESHOLD)
     parser.add_argument("--face-tolerance", type=float, default=FACE_MATCH_TOLERANCE)
     parser.add_argument("--vehicle-id", default=os.getenv("VEHICLE_ID", "BUS_001"))

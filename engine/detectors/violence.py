@@ -16,8 +16,9 @@ v2 Accuracy and Resilience Upgrades:
 
 import time
 import math
+from collections import deque
 from concurrent.futures import Future
-from typing import Dict, Tuple, List, Optional
+from typing import Deque, Dict, Tuple, List, Optional
 
 import numpy as np
 
@@ -30,7 +31,13 @@ from engine.config import (
     VIOLENCE_CONFIRM_FRAMES,
     VIOLENCE_PAIR_TTL_S,
 )
-from engine.utils.geometry import dist, bbox_iou, bbox_center, crop_bbox
+from engine.utils.geometry import (
+    dist,
+    bbox_iou,
+    bbox_center,
+    boxes_intersect_with_radius,
+    crop_bbox,
+)
 
 
 # EMA time constant in seconds (replaces fixed alpha for FPS independence)
@@ -60,7 +67,8 @@ class ViolenceDetector:
         self._kinetic_ema: Dict[int, float] = {}
         # Body centroid kinetic EMA per track (pose-free fallback)
         self._body_ema: Dict[int, float] = {}
-        # Previous wrist vertical direction per track (for oscillation)
+        # Previous wrist horizontal & vertical velocity per track (for 2D oscillation)
+        self._prev_wrist_vx: Dict[int, float] = {}
         self._prev_wrist_vy: Dict[int, float] = {}
         # Oscillation counter per track
         self._oscillation_count: Dict[int, int] = {}
@@ -68,6 +76,8 @@ class ViolenceDetector:
         self.vlm = vlm
         # Per-pair async VLM state: key -> {"status": str, "ts": float, "future": Optional[Future]}
         self._vlm_cache: Dict[Tuple[int, int], Dict[str, object]] = {}
+        # Incremental 768-D SigLIP embedding ring buffer per pair (encodes 1 frame/check instead of 4x!)
+        self._pair_embeds: Dict[Tuple[int, int], Deque[np.ndarray]] = {}
         # Resolution scale factor (1.0 = 720p reference)
         self._scale: float = 1.0
 
@@ -104,12 +114,14 @@ class ViolenceDetector:
             return 0.0
         gvx, gvy = global_vel
         speeds = []
+        vx_values = []
         vy_values = []
         for name, position in wrists.items():
             if name in old_wrists:
                 vx = (position[0] - old_wrists[name][0]) / elapsed - gvx
                 vy = (position[1] - old_wrists[name][1]) / elapsed - gvy
                 speeds.append(math.hypot(vx, vy))
+                vx_values.append(vx)
                 vy_values.append(vy)
 
         if not speeds:
@@ -124,16 +136,18 @@ class ViolenceDetector:
             alpha * peak + (1 - alpha) * prev_ema
         )
 
-        # Track oscillation (direction changes in wrist movement)
-        if vy_values:
-            avg_vy = sum(vy_values) / len(vy_values)
+        # Track 2D oscillation (horizontal jabs/shoves OR vertical strikes)
+        if vx_values or vy_values:
+            avg_vx = sum(vx_values) / len(vx_values) if vx_values else 0.0
+            avg_vy = sum(vy_values) / len(vy_values) if vy_values else 0.0
+            prev_vx = self._prev_wrist_vx.get(track_id, 0.0)
             prev_vy = self._prev_wrist_vy.get(track_id, 0.0)
+            self._prev_wrist_vx[track_id] = avg_vx
             self._prev_wrist_vy[track_id] = avg_vy
-            # Direction reversal with significant speed
-            if (
-                prev_vy * avg_vy < 0  # sign change
-                and abs(avg_vy) > _OSCILLATION_SPEED_THRESHOLD * self._scale
-            ):
+            osc_thresh = _OSCILLATION_SPEED_THRESHOLD * self._scale
+            horiz_rev = (prev_vx * avg_vx < 0) and (abs(avg_vx) > osc_thresh)
+            vert_rev = (prev_vy * avg_vy < 0) and (abs(avg_vy) > osc_thresh)
+            if horiz_rev or vert_rev:
                 self._oscillation_count[track_id] = (
                     self._oscillation_count.get(track_id, 0) + 1
                 )
@@ -227,10 +241,22 @@ class ViolenceDetector:
         if fut is not None:
             if fut.done():
                 state["future"] = None
+                new_emb = None
                 try:
-                    passed = bool(fut.result())
+                    res = fut.result()
+                    if isinstance(res, tuple) and len(res) == 2:
+                        passed = bool(res[0])
+                        new_emb = res[1]
+                    else:
+                        passed = bool(res)
                 except Exception:
                     passed = False
+                if new_emb is not None:
+                    ebuf = self._pair_embeds.get(key)
+                    if ebuf is None:
+                        ebuf = deque(maxlen=4)
+                        self._pair_embeds[key] = ebuf
+                    ebuf.append(new_emb)
                 state["status"] = "PASS" if passed else "REJECT"
                 state["ts"] = now
             else:
@@ -238,9 +264,16 @@ class ViolenceDetector:
 
         status = str(state.get("status", "NONE"))
         age = now - float(state.get("ts", 0.0))
-        if status == "PASS" and age < _VLM_PASS_CACHE_S:
+        ebuf_len = len(self._pair_embeds.get(key, ()))
+        if 1 <= ebuf_len < 4:
+            pass_ttl = 0.30
+            reject_ttl = 0.30
+        else:
+            pass_ttl = _VLM_PASS_CACHE_S
+            reject_ttl = _VLM_REJECT_CACHE_S
+        if status == "PASS" and age < pass_ttl:
             return "PASS"
-        if status == "REJECT" and age < _VLM_REJECT_CACHE_S:
+        if status == "REJECT" and age < reject_ttl:
             return "REJECT"
 
         # 2. Extract 1.15x union crop covering both interacting persons
@@ -254,14 +287,28 @@ class ViolenceDetector:
         if pair_crop is None or pair_crop.size == 0:
             return "REJECT"
 
-        # 3. Synchronous path (tests / no executor) vs non-blocking async GPU job
+        prev_embeds = list(self._pair_embeds.get(key, ()))
+
+        # 3. Synchronous path (tests / no executor) vs non-blocking incremental GPU job
         if sync or getattr(self.vlm, "_executor", None) is None:
-            passed = bool(self.vlm.verify_violence(pair_crop))
+            if hasattr(self.vlm, "verify_violence_step"):
+                passed, new_emb = self.vlm.verify_violence_step(pair_crop, prev_embeds, max_len=4)
+                if new_emb is not None:
+                    ebuf = self._pair_embeds.get(key)
+                    if ebuf is None:
+                        ebuf = deque(maxlen=4)
+                        self._pair_embeds[key] = ebuf
+                    ebuf.append(new_emb)
+            else:
+                passed = bool(self.vlm.verify_violence(pair_crop))
             state["status"] = "PASS" if passed else "REJECT"
             state["ts"] = now
             return str(state["status"])
 
-        state["future"] = self.vlm.submit_violence(pair_crop)
+        if hasattr(self.vlm, "submit_violence_step"):
+            state["future"] = self.vlm.submit_violence_step(pair_crop, prev_embeds, max_len=4)
+        else:
+            state["future"] = self.vlm.submit_violence(pair_crop)
         state["status"] = "PENDING"
         return "PENDING"
 
@@ -303,8 +350,16 @@ class ViolenceDetector:
                 cb = centers[id_b]
                 center_d = dist(ca, cb)
 
-                # Contact or close proximity check (fights often occur at arm's length)
-                is_contact = (iou >= VIOLENCE_IOU_THRESHOLD) or (center_d <= scaled_proximity)
+                # Scale-adaptive arm's-length contact check: two foreground people
+                # (~200px wide) standing chest-to-chest have center_d >= 200px even
+                # when actively trading punches, so check box edge distance too.
+                avg_w = 0.5 * ((box_a[2] - box_a[0]) + (box_b[2] - box_b[0]))
+                arm_reach_px = max(55.0 * self._scale, min(140.0 * self._scale, avg_w * 0.45))
+                is_contact = (
+                    (iou >= VIOLENCE_IOU_THRESHOLD)
+                    or (center_d <= scaled_proximity)
+                    or boxes_intersect_with_radius(box_a, box_b, arm_reach_px)
+                )
                 if not is_contact:
                     continue
 
@@ -359,35 +414,48 @@ class ViolenceDetector:
                     entry["streak"] = max(0.0, float(entry["streak"]) - 0.2)
                     continue
 
-                # Multi-modal Violence Detection logic (calibrated against transit false positives):
+                # Multi-modal Violence Detection logic (calibrated for 6-25 FPS CCTV):
                 # 1. High sustained wrist kinetic energy (pose strikes)
-                # 2. Fast convergence / charging into contact with high striking speed
-                # 3. Repeated oscillating strikes (punching/flailing)
-                # 4. Whole-body rapid scuffling with differential inter-person motion
-                #    (rejects two passengers walking/running in parallel together)
+                # 2. Fast toe-to-toe punch/slap peak (catches strikes without needing charge-in)
+                # 3. Repeated oscillating strikes (horizontal/vertical punching/flailing)
+                # 4. Whole-body rapid scuffling or close-overlap grappling/shoving with
+                #    differential inter-person motion (rejects parallel walking & calm standing)
                 is_violent_frame = False
-                if wrist_ema >= scaled_wrist * 0.85:
+                streak_gain = 1.0
+                if wrist_ema >= scaled_wrist * 0.72:
                     is_violent_frame = True
-                elif wrist_peak >= scaled_wrist * 1.1 and conv > scaled_conv:
+                elif wrist_peak >= scaled_wrist * 0.90:
                     is_violent_frame = True
-                elif max_osc >= 3 and wrist_ema >= scaled_wrist * 0.60:
+                elif wrist_peak >= scaled_wrist * 0.75 and conv > scaled_conv * 0.75:
+                    is_violent_frame = True
+                elif max_osc >= 2 and wrist_ema >= scaled_wrist * 0.55:
                     is_violent_frame = True
                 elif (
-                    body_ema >= scaled_body * 0.85
-                    and rel_body_speed >= scaled_body * 0.45
+                    body_ema >= scaled_body * 0.70
+                    and rel_body_speed >= scaled_body * 0.35
                     and is_contact
-                    and (conv > scaled_conv * 0.5 or max_osc >= 2)
+                    and (conv > scaled_conv * 0.4 or max_osc >= 1 or iou >= 0.14)
                 ):
                     is_violent_frame = True
                 elif (
-                    body_peak >= scaled_body * 1.1
-                    and rel_body_speed >= scaled_body * 0.45
-                    and conv > scaled_conv
+                    body_peak >= scaled_body * 0.90
+                    and rel_body_speed >= scaled_body * 0.40
+                    and (conv > scaled_conv * 0.6 or iou >= 0.14)
                 ):
                     is_violent_frame = True
+                elif (
+                    iou >= 0.15
+                    and (
+                        rel_body_speed >= scaled_body * 0.35
+                        or (body_peak >= scaled_body * 0.55 and rel_body_speed >= scaled_body * 0.25)
+                    )
+                ):
+                    # Close-overlap grappling/wrestling fallback when wrists are occluded
+                    is_violent_frame = True
+                    streak_gain = 0.85
 
                 if is_violent_frame:
-                    entry["streak"] += 1.0
+                    entry["streak"] += streak_gain
                     entry["peak"] = max(float(entry["peak"]), effective_peak)
                     # Update spatial history so ID switches retain streak
                     self._spatial_history.append({
@@ -398,32 +466,32 @@ class ViolenceDetector:
                         "first_contact": entry.get("first_contact", now),
                     })
                 else:
-                    # Dissipate transient physical contact or bus bump fast
-                    entry["streak"] = max(0.0, float(entry["streak"]) - 0.8)
+                    # Soft recoil decay so brief 150ms pauses between punches don't erase a fight
+                    entry["streak"] = max(0.0, float(entry["streak"]) - 0.35)
 
                 contact_duration = now - float(entry.get("first_contact", now))
-                # Pre-warm Stage-2 async GPU VLM 1 frame early so confirmation has 0 extra latency
+                # Pre-warm Stage-2 async GPU VLM as soon as streak >= 1.0 so verdict is ready immediately
                 vlm_state = "PASS"
                 if (
                     frame is not None
                     and self.vlm is not None
                     and self.vlm.available
-                    and entry["streak"] >= max(1.0, VIOLENCE_CONFIRM_FRAMES - 1.0)
+                    and entry["streak"] >= 1.0
                 ):
                     vlm_state = self._check_vlm_pair(
                         key, box_a, box_b, frame, now, sync=sync_vlm
                     )
 
-                if entry["streak"] >= VIOLENCE_CONFIRM_FRAMES and contact_duration >= 0.4:
+                if entry["streak"] >= VIOLENCE_CONFIRM_FRAMES and contact_duration >= 0.35:
                     if vlm_state == "PASS":
                         confirmed.append((key[0], key[1], max(iou, 0.10), float(entry["peak"])))
                         # Controlled decay so sustained fights maintain status without flooding duplicate bursts
-                        entry["streak"] = max(0.0, float(entry["streak"]) - 3.0)
+                        entry["streak"] = max(0.0, float(entry["streak"]) - 2.0)
                         self._oscillation_count.pop(id_a, None)
                         self._oscillation_count.pop(id_b, None)
                     elif vlm_state == "REJECT":
                         # Visually confirmed non-violent (talking/hugging/crowded standing)
-                        entry["streak"] = max(0.0, float(entry["streak"]) - 2.0)
+                        entry["streak"] = max(0.0, float(entry["streak"]) - 1.5)
 
         # Update centroids for convergence in subsequent frames
         for pid, pt in centers.items():
@@ -434,6 +502,7 @@ class ViolenceDetector:
             if now - float(self.pairs[key]["last"]) > VIOLENCE_PAIR_TTL_S:
                 del self.pairs[key]
                 self._vlm_cache.pop(key, None)
+                self._pair_embeds.pop(key, None)
 
         active_ids = {track_id for track_id, _ in persons}
         for track_id in list(self.previous_wrists):
@@ -448,6 +517,9 @@ class ViolenceDetector:
         for track_id in list(self._prev_centroid):
             if track_id not in active_ids:
                 del self._prev_centroid[track_id]
+        for track_id in list(self._prev_wrist_vx):
+            if track_id not in active_ids:
+                del self._prev_wrist_vx[track_id]
         for track_id in list(self._prev_wrist_vy):
             if track_id not in active_ids:
                 del self._prev_wrist_vy[track_id]

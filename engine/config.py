@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 ENGINE_DEVICE = os.getenv("ENGINE_DEVICE", "auto").strip().lower()
 
@@ -8,8 +8,10 @@ ENGINE_DEVICE = os.getenv("ENGINE_DEVICE", "auto").strip().lower()
 def resolve_compute_device() -> Tuple[str, bool, str]:
     """Return ``(device_str, use_half, label)`` for PyTorch / Ultralytics / CLIP.
 
-    Automatically enables ``cuda:0`` + FP16 (``half=True``) when an NVIDIA CUDA
-    GPU is detected, with safe fallback to ``('cpu', False, 'CPU')``.
+    Automatically enables ``cuda:0`` when an NVIDIA CUDA GPU is detected, and
+    only enables YOLO FP16 on GPUs with hardware Tensor Cores (Ampere+ ``sm_80+``
+    or Volta/Turing RTX/T4/V100). Non-Tensor-Core Turing GPUs (Quadro T1000/T2000,
+    GTX 16xx) run YOLO ~20% faster and with higher precision in native FP32.
     Override via ``ENGINE_DEVICE=cpu`` or ``ENGINE_DEVICE=cuda:0``.
     """
     requested = os.getenv("ENGINE_DEVICE", ENGINE_DEVICE).strip().lower()
@@ -22,7 +24,13 @@ def resolve_compute_device() -> Tuple[str, bool, str]:
             idx = int(dev.split(":")[1]) if ":" in dev and dev.split(":")[1].isdigit() else 0
             props = torch.cuda.get_device_properties(idx)
             vram_gb = props.total_memory / (1024 ** 3)
-            return (dev, True, f"{props.name} ({vram_gb:.1f} GB VRAM, FP16)")
+            name_lower = props.name.lower()
+            has_tensor_cores = props.major >= 8 or (
+                props.major == 7
+                and any(tag in name_lower for tag in ("rtx", "t4", "v100", "titan v", "gv100"))
+            )
+            prec = "FP16" if has_tensor_cores else "FP32"
+            return (dev, has_tensor_cores, f"{props.name} ({vram_gb:.1f} GB VRAM, {prec})")
     except Exception:
         pass
     return ("cpu", False, "CPU")
@@ -39,6 +47,24 @@ def default_models_for_device() -> Tuple[str, str]:
     if dev.startswith("cuda"):
         return ("yolo11s.pt", "yolo11s-pose.pt")
     return ("yolov8n.pt", "")
+
+_ULTRALYTICS_HAS_QUANTIZE: Optional[bool] = None
+
+def yolo_precision_kwargs(use_half: bool) -> Dict[str, object]:
+    """Return FP16 kwargs compatible with Ultralytics >=8.4 (`quantize`) and older (`half`),
+    or an empty dict in FP32 mode so zero per-call quantization overhead occurs."""
+    if not use_half:
+        return {}
+    global _ULTRALYTICS_HAS_QUANTIZE
+    if _ULTRALYTICS_HAS_QUANTIZE is None:
+        try:
+            from ultralytics.cfg import DEFAULT_CFG_DICT
+            _ULTRALYTICS_HAS_QUANTIZE = "quantize" in DEFAULT_CFG_DICT
+        except Exception:
+            _ULTRALYTICS_HAS_QUANTIZE = False
+    if _ULTRALYTICS_HAS_QUANTIZE:
+        return {"quantize": "fp16"}
+    return {"half": True}
 
 CLS_PERSON = 0
 CLS_BACKPACK = 24
@@ -108,32 +134,34 @@ VLM_FALLBACK_MODELS = (
 VIOLENCE_VLM_VERIFY = os.getenv("VIOLENCE_VLM_VERIFY", "1").strip().lower() not in ("0", "false", "no")
 
 # --- Pillar 5: violence detection ---
-VIOLENCE_IOU_THRESHOLD = float(os.getenv("VIOLENCE_IOU_THRESHOLD", "0.12"))
-VIOLENCE_PROXIMITY_PX = float(os.getenv("VIOLENCE_PROXIMITY_PX", "120.0"))
+VIOLENCE_IOU_THRESHOLD = float(os.getenv("VIOLENCE_IOU_THRESHOLD", "0.08"))
+VIOLENCE_PROXIMITY_PX = float(os.getenv("VIOLENCE_PROXIMITY_PX", "140.0"))
 VIOLENCE_WRIST_SPEED_PX_S = float(os.getenv("VIOLENCE_WRIST_SPEED_PX_S", "300.0"))
-VIOLENCE_BODY_SPEED_PX_S = float(os.getenv("VIOLENCE_BODY_SPEED_PX_S", "250.0"))
-VIOLENCE_CONFIRM_FRAMES = int(os.getenv("VIOLENCE_CONFIRM_FRAMES", "5"))
+VIOLENCE_BODY_SPEED_PX_S = float(os.getenv("VIOLENCE_BODY_SPEED_PX_S", "240.0"))
+VIOLENCE_CONFIRM_FRAMES = int(os.getenv("VIOLENCE_CONFIRM_FRAMES", "3"))
 VIOLENCE_PAIR_TTL_S = 3.0
 
 # --- Pillar 6: biometric watchlist ---
 FACE_MATCH_TOLERANCE = float(os.getenv("FACE_MATCH_TOLERANCE", "0.50"))
-# InsightFace ArcFace 512-D cosine similarity threshold (higher = stricter; 0.45 = <0.01% FAR)
-FACE_COSINE_THRESHOLD = float(os.getenv("FACE_COSINE_THRESHOLD", "0.45"))
+# InsightFace ArcFace 512-D cosine similarity threshold (0.36 tuned for 720p CCTV + buffalo_sc/buffalo_l with 2-frame consensus)
+FACE_COSINE_THRESHOLD = float(os.getenv("FACE_COSINE_THRESHOLD", "0.36"))
 # Face backend preference: 'auto' (prefers InsightFace SCRFD+ArcFace, falls back to dlib)
 FACE_BACKEND_PREF = os.getenv("FACE_BACKEND", "auto").strip().lower()
 # InsightFace pack: 'auto' picks buffalo_l on >=6GB GPU (RTX 3060) or buffalo_sc on 4GB/CPU
 INSIGHTFACE_MODEL = os.getenv("INSIGHTFACE_MODEL", "auto").strip()
-FACE_RESCAN_INTERVAL_S = 1.0
+FACE_RESCAN_INTERVAL_S = float(os.getenv("FACE_RESCAN_INTERVAL_S", "0.65"))
 # Faster rescan while a track has an unconfirmed (1-of-2) watchlist hit
-FACE_PENDING_RESCAN_S = 0.35
-# Minimum face box side (px). Smaller faces give near-random embeddings.
-FACE_MIN_SIZE = int(os.getenv("FACE_MIN_SIZE", "56"))
-# Minimum Laplacian variance (sharpness) of the face crop before encoding
-FACE_MIN_SHARPNESS = float(os.getenv("FACE_MIN_SHARPNESS", "30.0"))
+FACE_PENDING_RESCAN_S = float(os.getenv("FACE_PENDING_RESCAN_S", "0.25"))
+# Non-match backoff duration (s) before rescanning the same person track
+FACE_NON_MATCH_BACKOFF_S = float(os.getenv("FACE_NON_MATCH_BACKOFF_S", "2.5"))
+# Minimum face box side (px). 34px allows mid-range 720p bus faces (3-6m) without garbage crops.
+FACE_MIN_SIZE = int(os.getenv("FACE_MIN_SIZE", "34"))
+# Minimum Laplacian variance (sharpness) of the face crop before encoding (H.264 CCTV-friendly)
+FACE_MIN_SHARPNESS = float(os.getenv("FACE_MIN_SHARPNESS", "14.0"))
 # A watchlist identity must be matched this many times within the window
 FACE_CONSENSUS_HITS = int(os.getenv("FACE_CONSENSUS_HITS", "2"))
-FACE_CONSENSUS_WINDOW_S = 4.0
-# Full-frame face fallback scan (expensive HOG) interval
+FACE_CONSENSUS_WINDOW_S = float(os.getenv("FACE_CONSENSUS_WINDOW_S", "6.0"))
+# Full-frame face fallback scan interval
 FACE_FULL_FRAME_INTERVAL_S = 3.0
 
 # --- Scene pre-processing / gating ---
@@ -155,6 +183,11 @@ _TRACKER_TYPE = os.getenv("TRACKER_TYPE", "auto").strip().lower()
 _ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 _BOTSORT_CFG = os.path.join(_ENGINE_DIR, "transguard_botsort.yaml")
 _BYTETRACK_CFG = os.path.join(_ENGINE_DIR, "transguard_bytetrack.yaml")
+_FINE_TUNED_WEAPON_MODEL = os.path.join(_ENGINE_DIR, "weights", "yolo11s-weapons.pt")
+DEFAULT_WEAPON_MODEL = os.getenv(
+    "WEAPON_MODEL",
+    _FINE_TUNED_WEAPON_MODEL if os.path.exists(_FINE_TUNED_WEAPON_MODEL) else "yolov8n-weapons.pt",
+).strip() or "yolov8n-weapons.pt"
 _DEV_STR, _, _ = resolve_compute_device()
 if _TRACKER_TYPE == "botsort" or (_TRACKER_TYPE == "auto" and _DEV_STR.startswith("cuda")):
     _DEFAULT_TRACKER = _BOTSORT_CFG if os.path.exists(_BOTSORT_CFG) else _BYTETRACK_CFG
@@ -203,7 +236,7 @@ class EngineConfig:
     ffmpeg_bin: str = "ffmpeg"
     conf: float = YOLO_CONF_THRESHOLD
     mediamtx_rtsp_url: str = "rtsp://127.0.0.1:8554"
-    weapon_model: str = "yolov8n-weapons.pt"
+    weapon_model: str = DEFAULT_WEAPON_MODEL
     weapon_conf: float = WEAPON_CONF_THRESHOLD
     face_tolerance: float = FACE_MATCH_TOLERANCE
     crowd_threshold: int = CROWD_PERSON_THRESHOLD

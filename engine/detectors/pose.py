@@ -31,6 +31,7 @@ from engine.config import (
     FALL_VISIBILITY_THRESHOLD,
     POSE_MODEL,
     resolve_compute_device,
+    yolo_precision_kwargs,
 )
 from engine.utils.geometry import bbox_iou
 
@@ -151,7 +152,7 @@ class PoseEngine:
                 verbose=False,
                 conf=0.35,
                 device=getattr(self, "_device", "cpu"),
-                half=getattr(self, "_use_half", False),
+                **yolo_precision_kwargs(getattr(self, "_use_half", False)),
             )[0]
         except Exception as exc:
             log.debug("YOLO-pose inference error: %s", exc)
@@ -335,13 +336,20 @@ class PoseEngine:
         # are standing with wide arms/bag, not collapsed on the floor.
         ref_h = standing_heights.get(track_id)
         height_collapsed = True if ref_h is None else (box_h <= ref_h * 0.75)
+        # Perspective-foreshortened aisle collapse (person falls lengthwise toward/away
+        # from a bus corridor camera so bbox aspect is 0.72..1.20 instead of >1.20)
+        foreshortened_collapse = (
+            ref_h is not None
+            and box_h <= ref_h * 0.58
+            and (box_w / box_h) >= 0.72
+        )
 
         # ---- Combined decision ----
         if points and (head_below_hips or torso_horizontal):
-            fall_posture = horizontal and height_collapsed
+            fall_posture = (horizontal and height_collapsed) or foreshortened_collapse
         elif not points or not self.available:
             # Occluded skeleton fallback: require horizontal bbox + recent drop + collapse
-            fall_posture = horizontal and had_velocity_spike and height_collapsed
+            fall_posture = (horizontal or foreshortened_collapse) and had_velocity_spike and height_collapsed
         else:
             fall_posture = False
 

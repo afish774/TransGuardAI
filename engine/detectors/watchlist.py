@@ -33,6 +33,7 @@ from engine.config import (
     FACE_MATCH_TOLERANCE,
     FACE_MIN_SHARPNESS,
     FACE_MIN_SIZE,
+    FACE_NON_MATCH_BACKOFF_S,
     FACE_PENDING_RESCAN_S,
     FACE_RESCAN_INTERVAL_S,
     INSIGHTFACE_MODEL,
@@ -51,6 +52,30 @@ _face_recognition = None
 if FACE_BACKEND_PREF in ("auto", "insightface"):
     try:
         from insightface.app import FaceAnalysis as _FaceAnalysis
+        # Future-proof insightface.utils.face_align against scikit-image >=0.26
+        # deprecating (and 2.2 removing) SimilarityTransform.estimate()
+        try:
+            from insightface.utils import face_align as _face_align
+            from skimage import transform as _sk_trans
+
+            if hasattr(_sk_trans.SimilarityTransform, "from_estimate"):
+                def _estimate_norm_compat(lmk, image_size=112, mode="arcface"):
+                    assert lmk.shape == (5, 2)
+                    assert image_size % 112 == 0 or image_size % 128 == 0
+                    if image_size % 112 == 0:
+                        ratio = float(image_size) / 112.0
+                        diff_x = 0.0
+                    else:
+                        ratio = float(image_size) / 128.0
+                        diff_x = 8.0 * ratio
+                    dst = _face_align.arcface_dst * ratio
+                    dst[:, 0] += diff_x
+                    tform = _sk_trans.SimilarityTransform.from_estimate(lmk, dst)
+                    return tform.params[0:2, :]
+
+                _face_align.estimate_norm = _estimate_norm_compat
+        except Exception:
+            pass
         _insightface_app_cls = _FaceAnalysis
         FACE_BACKEND = "insightface"
     except Exception:
@@ -94,9 +119,9 @@ def is_frontal_5pt(kps: Optional[np.ndarray]) -> bool:
     min_eye = min(le_x, re_x)
     max_eye = max(le_x, re_x)
     eye_span = max_eye - min_eye
-    if eye_span < 8.0:
+    if eye_span < 5.0:
         return False
-    margin = eye_span * 0.28
+    margin = eye_span * 0.42
     return (min_eye - margin) <= nose_x <= (max_eye + margin)
 
 
@@ -145,6 +170,7 @@ class Watchlist:
     ):
         self.encodings: List[np.ndarray] = []
         self.names: List[str] = []
+        self._encoding_frontal: List[bool] = []
         # Multi-photo normalized centroid per identity (built when >= 2 photos share a name)
         self._identity_centroids: Dict[str, np.ndarray] = {}
         self.tolerance = tolerance
@@ -183,15 +209,25 @@ class Watchlist:
     # Multi-photo centroid builder
     # ------------------------------------------------------------------
     def _rebuild_centroids(self) -> None:
-        """Build per-identity mean embedding whenever >= 2 reference photos exist."""
-        grouped: Dict[str, List[np.ndarray]] = defaultdict(list)
-        for name, enc in zip(self.names, self.encodings):
-            grouped[name].append(np.asarray(enc, dtype=np.float32))
+        """Build per-identity mean embedding, preferring frontal shots so extreme 90° profiles
+        don't dilute the frontal centroid while remaining active in ``self.encodings``."""
+        all_grouped: Dict[str, List[np.ndarray]] = defaultdict(list)
+        frontal_grouped: Dict[str, List[np.ndarray]] = defaultdict(list)
+        flags = getattr(self, "_encoding_frontal", None) or [True] * len(self.encodings)
+        if len(flags) < len(self.encodings):
+            flags = list(flags) + [True] * (len(self.encodings) - len(flags))
+
+        for name, enc, is_front in zip(self.names, self.encodings, flags):
+            vec = np.asarray(enc, dtype=np.float32)
+            all_grouped[name].append(vec)
+            if is_front:
+                frontal_grouped[name].append(vec)
 
         centroids: Dict[str, np.ndarray] = {}
-        for name, vecs in grouped.items():
-            if len(vecs) < 2:
+        for name, all_vecs in all_grouped.items():
+            if len(all_vecs) < 2:
                 continue
+            vecs = frontal_grouped[name] if len(frontal_grouped[name]) >= 2 else all_vecs
             mean_vec = np.mean(np.stack(vecs, axis=0), axis=0)
             if self.backend == "insightface":
                 norm = float(np.linalg.norm(mean_vec))
@@ -203,22 +239,23 @@ class Watchlist:
     # ------------------------------------------------------------------
     # Watchlist sync (from backend / control message)
     # ------------------------------------------------------------------
-    def _encode_reference_insightface(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+    def _encode_reference_insightface(self, image_bgr: np.ndarray) -> Tuple[Optional[np.ndarray], bool]:
         if self._insight_app is None:
-            return None
+            return (None, False)
         faces = self._insight_app.get(image_bgr)
         if not faces:
-            return None
+            return (None, False)
         # Pick largest face in reference photo
         best = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        frontal = is_frontal_5pt(getattr(best, "kps", None))
         emb = getattr(best, "normed_embedding", None)
         if emb is None:
             raw = getattr(best, "embedding", None)
             if raw is None:
-                return None
+                return (None, False)
             norm = float(np.linalg.norm(raw))
             emb = raw / norm if norm > 1e-6 else None
-        return np.asarray(emb, dtype=np.float32) if emb is not None else None
+        return (np.asarray(emb, dtype=np.float32) if emb is not None else None, frontal)
 
     def _encode_reference_dlib(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
         if _face_recognition is None:
@@ -238,6 +275,7 @@ class Watchlist:
             return
         new_encodings: List[np.ndarray] = []
         new_names: List[str] = []
+        new_frontal: List[bool] = []
 
         for target in targets:
             if not isinstance(target, dict):
@@ -250,8 +288,9 @@ class Watchlist:
                 image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if image is None:
                     continue
+                is_front = True
                 if self.backend == "insightface" and self._insight_app is not None:
-                    enc = self._encode_reference_insightface(image)
+                    enc, is_front = self._encode_reference_insightface(image)
                 else:
                     enc = self._encode_reference_dlib(image)
                 if enc is None:
@@ -259,12 +298,19 @@ class Watchlist:
                     continue
                 new_encodings.append(enc)
                 new_names.append(name)
-                log.info("Watchlist (%s) encoded face for '%s'", self.backend, name)
+                new_frontal.append(is_front)
+                log.info(
+                    "Watchlist (%s) encoded %s face for '%s'",
+                    self.backend,
+                    "frontal" if is_front else "angled/profile",
+                    name,
+                )
             except Exception as exc:
                 log.warning("Failed to encode %s: %s", name, exc)
 
         self.encodings = new_encodings
         self.names = new_names
+        self._encoding_frontal = new_frontal
         self._rebuild_centroids()
         # Invalidate caches when the watchlist changes
         self._track_cache.clear()
@@ -325,7 +371,7 @@ class Watchlist:
         meta = self._non_match_meta.get(track_id)
         if meta is not None:
             best_q, scanned_at = meta
-            if (now - scanned_at) < 4.0 and crop_quality <= best_q * 1.35:
+            if (now - scanned_at) < FACE_NON_MATCH_BACKOFF_S and crop_quality <= best_q * 1.25:
                 return True
         return False
 
@@ -464,6 +510,7 @@ class Watchlist:
 
         best_name: Optional[str] = None
         best_sim = -1.0
+        best_eff_thresh = self.cosine_threshold
         best_loc: Tuple[int, int, int, int] = (0, 0, 0, 0)
         best_crop_quality = 0.0
         scanned_any_clear = False
@@ -475,7 +522,11 @@ class Watchlist:
             fw, fh = r - l, b - t
             if fw < FACE_MIN_SIZE or fh < FACE_MIN_SIZE:
                 continue
-            if not is_frontal_5pt(getattr(face, "kps", None)):
+            frontal = is_frontal_5pt(getattr(face, "kps", None))
+            det_score = float(getattr(face, "det_score", 1.0))
+            # Allow confident angled/top-down CCTV faces (det_score >= 0.65) to match
+            # multi-angle reference photos with a +0.03 margin instead of dropping them
+            if not frontal and det_score < 0.65:
                 continue
             sharp = compute_sharpness(face_bgr[t:b, l:r])
             if sharp < FACE_MIN_SHARPNESS:
@@ -492,15 +543,17 @@ class Watchlist:
                 continue
 
             cand_name, cand_sim = self._best_cosine_match(emb)
-            if cand_name is not None and cand_sim > best_sim:
+            eff_thresh = self.cosine_threshold if frontal else (self.cosine_threshold + 0.03)
+            if cand_name is not None and (cand_sim - eff_thresh) > (best_sim - best_eff_thresh):
                 best_sim = cand_sim
+                best_eff_thresh = eff_thresh
                 best_name = cand_name
                 best_loc = (l, t, r, b)
 
-        if best_name is not None and best_sim >= self.cosine_threshold:
-            # Map cosine similarity [cosine_threshold..0.85] -> [65..99]%
-            span = max(0.05, 0.85 - self.cosine_threshold)
-            conf = round(max(60.0, min(99.0, 65.0 + ((best_sim - self.cosine_threshold) / span) * 34.0)), 1)
+        if best_name is not None and best_sim >= best_eff_thresh:
+            # Map cosine similarity [best_eff_thresh..0.85] -> [65..99]%
+            span = max(0.05, 0.85 - best_eff_thresh)
+            conf = round(max(60.0, min(99.0, 65.0 + ((best_sim - best_eff_thresh) / span) * 34.0)), 1)
             return self._finalize_match(
                 best_name, conf, best_loc, track_id, require_consensus, ts, f"sim={best_sim:.3f}"
             )

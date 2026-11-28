@@ -621,5 +621,293 @@ class TestTrackerAndFinetunePipeline(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestCCTVBlindSpotFixes(unittest.TestCase):
+    """Regression coverage for real-world CCTV blind spots audited across all 6 pillars."""
+
+    def test_foreshortened_lengthwise_aisle_fall_detected(self):
+        eng = PoseEngine.__new__(PoseEngine)
+        eng.pose = object()
+        eng._pose_landmark = None
+        eng._yolo_pose = None
+        eng.fall_streaks = {}
+        eng._prev_centroid = {}
+        eng._velocity_spike = {}
+        eng._standing_height = {}
+        eng._scale = 1.0
+
+        # Establish standing height H_0 = 240 px down the bus aisle
+        upright_pts = {
+            "NOSE": (140, 110, 0.9),
+            "LEFT_SHOULDER": (125, 140, 0.9), "RIGHT_SHOULDER": (155, 140, 0.9),
+            "LEFT_HIP": (130, 230, 0.9), "RIGHT_HIP": (150, 230, 0.9),
+        }
+        self.assertFalse(eng.is_fall(7, (100, 100, 180, 340), upright_pts, now=1.0))
+
+        # Passenger collapses lengthwise toward camera -> foreshortened squareish box
+        # width=85, height=100 (aspect=0.85 < 1.2, height=100 <= 0.58 * 240 = 139.2)
+        fallen_pts = {
+            "NOSE": (140, 310, 0.9),
+            "LEFT_SHOULDER": (110, 295, 0.9), "RIGHT_SHOULDER": (170, 295, 0.9),
+            "LEFT_HIP": (140, 290, 0.9), "RIGHT_HIP": (145, 290, 0.9),
+        }
+        detected = False
+        for i in range(1, FALL_CONFIRM_FRAMES + 4):
+            if eng.is_fall(7, (100, 240, 185, 340), fallen_pts, now=1.0 + i * 0.2):
+                detected = True
+                break
+        self.assertTrue(detected, "Lengthwise foreshortened aisle collapse should be detected")
+
+    def test_thin_blade_geometry_accepted_and_tiny_speck_rejected(self):
+        det = WeaponDetector.__new__(WeaponDetector)
+        det._scale = 1.0
+        # Horizontal knife blade 60x14 px (area 840 >= 300, max>=24, min>=10)
+        self.assertTrue(det._check_geometry("knife", 60, 14))
+        # Vertical pistol barrel 15x55 px
+        self.assertTrue(det._check_geometry("gun", 15, 55))
+        # Tiny 12x8 px sensor noise speck -> rejected
+        self.assertFalse(det._check_geometry("knife", 12, 8))
+
+    def test_horizontal_punch_vx_oscillation_tracked(self):
+        det = ViolenceDetector()
+        pts_base = {
+            "LEFT_SHOULDER": (100.0, 120.0, 0.9),
+            "RIGHT_SHOULDER": (140.0, 120.0, 0.9),
+            "LEFT_HIP": (105.0, 220.0, 0.9),
+            "RIGHT_HIP": (135.0, 220.0, 0.9),
+            "LEFT_WRIST": (100.0, 150.0, 0.9),
+        }
+        xs = [150.0, 230.0, 145.0, 235.0, 140.0]
+        for idx, wx in enumerate(xs):
+            pts = dict(pts_base)
+            pts["RIGHT_WRIST"] = (wx, 150.0, 0.95)
+            det.wrist_speed(1, pts, 1.0 + idx * 0.1)
+        self.assertGreaterEqual(det._oscillation_count.get(1, 0), 2)
+
+    def test_collinear_aisle_row_does_not_false_alarm_crowd_density(self):
+        # 5 passengers seated 200px apart in a straight horizontal row -> NOT crowded
+        spread_row = [(i, (i * 200, 100, i * 200 + 50, 220)) for i in range(5)]
+        d_row = CrowdDetector.compute_density(spread_row, scale=1.0)
+        self.assertLess(d_row, 2.0, "Spaced collinear passengers must not trigger density overcrowding")
+
+        # 5 passengers crushed 20px apart in a tight doorway cluster -> CROWDED
+        crush_cluster = [(i, (100 + i * 20, 100, 150 + i * 20, 220)) for i in range(5)]
+        d_crush = CrowdDetector.compute_density(crush_cluster, scale=1.0)
+        self.assertGreater(d_crush, 2.0)
+
+    def test_pose_aware_watchlist_centroid_excludes_extreme_profile_pollution(self):
+        wl = Watchlist(tolerance=0.50, cosine_threshold=0.36, backend="insightface")
+        f1 = np.zeros(512, dtype=np.float32); f1[0] = 1.0
+        f2 = np.zeros(512, dtype=np.float32); f2[0] = 0.98; f2[1] = 0.1989
+        # Extreme 90-degree ear shot pointing in orthogonal subspace
+        ear_shot = np.zeros(512, dtype=np.float32); ear_shot[2] = 1.0
+
+        wl.encodings = [f1, f2, ear_shot]
+        wl.names = ["balkees", "balkees", "balkees"]
+        wl._encoding_frontal = [True, True, False]
+        wl._rebuild_centroids()
+
+        centroid = wl._identity_centroids["balkees"]
+        # Centroid must remain aligned with frontal f1/f2 (no ear_shot component at index 2)
+        self.assertAlmostEqual(float(centroid[2]), 0.0, places=5)
+        self.assertGreater(float(centroid[0]), 0.98)
+        # Yet direct angle matching against ear_shot still works via individual encodings!
+        matched_name, sim = wl._best_cosine_match(ear_shot)
+        self.assertEqual(matched_name, "balkees")
+        self.assertGreater(sim, 0.99)
+
+    def test_pose_guided_hand_weapon_patrol_confirms_knife_and_rejects_empty_hands(self):
+        from engine.detectors.vlm_verifier import (
+            HAND_WEAPON_POSITIVE_PROMPTS,
+            HAND_WEAPON_NEGATIVE_PROMPTS,
+            VisionLanguageVerifier,
+        )
+
+        # 1. Clear real knife win -> 2 consecutive hand scans confirm CRIME_WEAPON_DETECTED
+        vlm_knife = VisionLanguageVerifier(
+            preferred_model="google/siglip-base-patch16-224",
+            pipe_override=lambda _img, candidate_labels: [
+                {"label": HAND_WEAPON_POSITIVE_PROMPTS[0][1], "score": 0.91},
+                {"label": HAND_WEAPON_NEGATIVE_PROMPTS[0], "score": 0.02},
+            ],
+            is_siglip_override=True,
+        )
+        det = WeaponDetector.__new__(WeaponDetector)
+        det.model = None
+        det._vlm = vlm_knife
+        det._scale = 1.0
+        det._frame_index = 0
+        det._spatial_streaks = []
+        det.streaks = {}
+        det.streak_last_seen = {}
+
+        frame = _make_textured_frame(720, 1280)
+        persons = [(10, (500, 100, 720, 620))]
+        landmarks = {10: {"LEFT_WRIST": (600.0, 320.0, 0.95), "RIGHT_WRIST": (640.0, 325.0, 0.90)}}
+
+        # 1st scan -> streak=1 (not yet emitted)
+        hits1 = det._poll_hand_patrol(frame, persons, landmarks, now=10.0, sync=True)
+        self.assertEqual(hits1, [])
+        # 2nd scan -> streak=2 -> CONFIRMED knife!
+        hits2 = det._poll_hand_patrol(frame, persons, landmarks, now=10.2, sync=True)
+        self.assertEqual(len(hits2), 1)
+        self.assertEqual(hits2[0][1], "knife")
+        self.assertGreater(hits2[0][2], 0.85)
+
+        # 2. Ambiguous empty-hand score (0.60 vs 0.15) -> REJECTED (0 false alerts)
+        vlm_empty = VisionLanguageVerifier(
+            preferred_model="google/siglip-base-patch16-224",
+            pipe_override=lambda _img, candidate_labels: [
+                {"label": HAND_WEAPON_POSITIVE_PROMPTS[0][1], "score": 0.60},
+                {"label": HAND_WEAPON_NEGATIVE_PROMPTS[-1], "score": 0.15},
+            ],
+            is_siglip_override=True,
+        )
+        det._vlm = vlm_empty
+        self.assertEqual(det._poll_hand_patrol(frame, persons, landmarks, now=11.0, sync=True), [])
+        self.assertEqual(det._poll_hand_patrol(frame, persons, landmarks, now=11.5, sync=True), [])
+
+    def test_decoupled_overlay_recorder_and_expiry(self):
+        from engine.utils.overlays import OverlayRecorder, render_overlays
+
+        f1 = np.zeros((720, 1280, 3), dtype=np.uint8)
+        ov = OverlayRecorder()
+        ov.rect(f1, (100, 100), (300, 400), (0, 255, 0), 2)
+        ov.text(f1, "Person #1", (100, 94), 0.5, (0, 255, 0), 2)
+        pkt = ov.packet(ts=100.0, width=1280, height=720)
+
+        # Fresh overlay stamps cleanly onto a raw 25 FPS frame
+        live_raw = np.zeros((720, 1280, 3), dtype=np.uint8)
+        rendered = render_overlays(live_raw.copy(), pkt, now=100.2, max_age_s=1.5)
+        self.assertGreater(int(rendered.sum()), 0)
+
+        # Stale overlay (>1.5s old) is skipped cleanly
+        stale = render_overlays(live_raw.copy(), pkt, now=105.0, max_age_s=1.5)
+        self.assertEqual(int(stale.sum()), 0)
+
+    def test_foreground_arms_length_fight_with_recoils_at_low_fps_triggers(self):
+        det = ViolenceDetector()
+        # Two foreground 200px-wide fighters facing each other with 30px chest gap
+        # (center_d = 230px > VIOLENCE_PROXIMITY_PX, IoU = 0.0)
+        persons = [(1, (300, 100, 500, 620)), (2, (530, 100, 730, 620))]
+        # Simulate 6.6 FPS (dt=0.15s) punches separated by a recoil pause frame
+        punch_seq = [420.0, 450.0, 50.0, 440.0, 410.0]
+        events = []
+        for idx, spd in enumerate(punch_seq):
+            events.extend(det.evaluate(persons, {1: spd, 2: 0.0}, now=10.0 + idx * 0.15))
+        self.assertTrue(events, "Foreground arm's-length fight with recoil frames must trigger violence")
+
+    def test_moving_weapon_hand_patrol_survives_single_blur_frame(self):
+        from engine.detectors.vlm_verifier import (
+            HAND_WEAPON_POSITIVE_PROMPTS,
+            HAND_WEAPON_NEGATIVE_PROMPTS,
+            VisionLanguageVerifier,
+        )
+
+        # Sequence: Hit 1 -> 1 motion-blurred miss -> Hit 2 -> MUST confirm (soft decay)
+        responses = iter([
+            [{"label": HAND_WEAPON_POSITIVE_PROMPTS[0][1], "score": 0.85},
+             {"label": HAND_WEAPON_NEGATIVE_PROMPTS[0], "score": 0.03}],
+            [{"label": HAND_WEAPON_NEGATIVE_PROMPTS[-1], "score": 0.70},
+             {"label": HAND_WEAPON_POSITIVE_PROMPTS[0][1], "score": 0.10}],
+            [{"label": HAND_WEAPON_POSITIVE_PROMPTS[0][1], "score": 0.88},
+             {"label": HAND_WEAPON_NEGATIVE_PROMPTS[0], "score": 0.02}],
+        ])
+        vlm = VisionLanguageVerifier(
+            preferred_model="google/siglip-base-patch16-224",
+            pipe_override=lambda _img, candidate_labels: next(responses),
+            is_siglip_override=True,
+        )
+        det = WeaponDetector.__new__(WeaponDetector)
+        det.model = None
+        det._vlm = vlm
+        det._scale = 1.0
+        det._frame_index = 0
+        det._spatial_streaks = []
+        det.streaks = {}
+        det.streak_last_seen = {}
+
+        frame = _make_textured_frame(720, 1280)
+        persons = [(5, (400, 100, 620, 620))]
+        lms = {5: {"LEFT_ELBOW": (460.0, 260.0, 0.9), "LEFT_WRIST": (510.0, 310.0, 0.95)}}
+
+        self.assertEqual(det._poll_hand_patrol(frame, persons, lms, now=1.0, sync=True), [])
+        self.assertEqual(det._poll_hand_patrol(frame, persons, lms, now=1.1, sync=True), [])
+        # After soft decay (1.0 -> 0.5) + hit (+1.0 -> 1.5), one more hit confirms; verify streak preserved > 0
+        self.assertGreater(det._hand_streaks[5][1], 0.0)
+
+    def test_trained_violence_head_loads_and_scores_sequences(self):
+        from engine.detectors.violence_head import TrainedViolenceHead, DEFAULT_VIOLENCE_HEAD_PATH
+
+        head = TrainedViolenceHead(DEFAULT_VIOLENCE_HEAD_PATH)
+        if not os.path.exists(DEFAULT_VIOLENCE_HEAD_PATH):
+            self.assertFalse(head.available)
+            return
+        self.assertTrue(head.available)
+        rng = np.random.default_rng(7)
+        seq = rng.standard_normal((6, 768)).astype(np.float32)
+        seq /= np.linalg.norm(seq, axis=-1, keepdims=True)
+        is_v, prob = head.predict_sequence(seq)
+        self.assertIsInstance(is_v, bool)
+        self.assertGreaterEqual(prob, 0.0)
+        self.assertLessEqual(prob, 1.0)
+        # Single-frame backup head also works cleanly
+        is_v1, prob1 = head.predict_sequence(seq[:1])
+        self.assertIsInstance(is_v1, bool)
+        self.assertGreaterEqual(prob1, 0.0)
+        self.assertLessEqual(prob1, 1.0)
+
+    def test_incremental_violence_embed_cache_and_weapon_class_thresholds(self):
+        from engine.detectors.weapon import CLASS_THRESHOLDS
+
+        self.assertAlmostEqual(CLASS_THRESHOLDS["pistol"], 0.48)
+        self.assertAlmostEqual(CLASS_THRESHOLDS["gun"], 0.48)
+        self.assertAlmostEqual(CLASS_THRESHOLDS["knife"], 0.40)
+
+        seen_prev_lens = []
+
+        class _FakeStepVLM:
+            available = True
+            _executor = None
+
+            def verify_violence_step(self, new_crop, prev_embeds, max_len=4):
+                seen_prev_lens.append(len(prev_embeds))
+                emb = np.full((768,), float(len(prev_embeds) + 1), dtype=np.float32)
+                return (True, emb)
+
+        det = ViolenceDetector(vlm=_FakeStepVLM())
+        frame = _make_textured_frame(360, 640)
+        persons = [(1, (100, 50, 220, 320)), (2, (160, 50, 280, 320))]
+        box_a, box_b = persons[0][1], persons[1][1]
+
+        # Bypass cache TTL across 5 steps to verify rolling maxlen=4 buffer
+        for step in range(5):
+            det._vlm_cache.pop((1, 2), None)
+            state = det._check_vlm_pair((1, 2), box_a, box_b, frame, now=10.0 + step * 2.0, sync=True)
+            self.assertEqual(state, "PASS")
+
+        self.assertEqual(seen_prev_lens, [0, 1, 2, 3, 4])
+        self.assertEqual(len(det._pair_embeds[(1, 2)]), 4)
+
+        # Verify warmup cadence (<4 embeds re-samples at dt=0.35s) vs steady-state (>=4 caches up to 1.2s)
+        det2 = ViolenceDetector(vlm=_FakeStepVLM())
+        seen_prev_lens.clear()
+        for step in range(4):
+            state = det2._check_vlm_pair((1, 2), box_a, box_b, frame, now=20.0 + step * 0.35, sync=True)
+            self.assertEqual(state, "PASS")
+        self.assertEqual(seen_prev_lens, [0, 1, 2, 3])
+        self.assertEqual(len(det2._pair_embeds[(1, 2)]), 4)
+
+        # Steady state at dt=0.35s hits cache (no new call to verify_violence_step)
+        cached_state = det2._check_vlm_pair((1, 2), box_a, box_b, frame, now=21.40, sync=True)
+        self.assertEqual(cached_state, "PASS")
+        self.assertEqual(seen_prev_lens, [0, 1, 2, 3])
+
+        # Steady state at dt=1.50s refreshes the rolling maxlen=4 buffer
+        refreshed_state = det2._check_vlm_pair((1, 2), box_a, box_b, frame, now=22.55, sync=True)
+        self.assertEqual(refreshed_state, "PASS")
+        self.assertEqual(seen_prev_lens, [0, 1, 2, 3, 4])
+        self.assertEqual(len(det2._pair_embeds[(1, 2)]), 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

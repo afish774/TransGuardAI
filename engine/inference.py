@@ -23,6 +23,7 @@ from engine.config import (
     TRACKER_CONFIG,
     VIOLENCE_VLM_VERIFY,
     resolve_compute_device,
+    yolo_precision_kwargs,
 )
 from engine.utils.geometry import (
     bbox_center,
@@ -40,6 +41,7 @@ from engine.utils.scene import (
     point_in_roi,
 )
 from engine.utils.queues import put_latest, publish_health
+from engine.utils.overlays import OverlayRecorder
 from engine.utils.logging import configure_worker_logging, log
 
 from engine.detectors.pose import PoseEngine
@@ -125,6 +127,7 @@ class IncidentProcessor:
         self._calibrated: bool = False
         self._roi_polygon: Optional[np.ndarray] = None
         self._seat_polygons: List[np.ndarray] = []
+        self.last_overlays: Optional[Dict[str, object]] = None
 
     def close(self) -> None:
         self.pose.close()
@@ -250,7 +253,12 @@ class IncidentProcessor:
         center = bbox_center(bbox)
         return any(point_in_roi(center, poly) for poly in self._seat_polygons)
 
-    def _harvest_face_jobs(self, display_frame: np.ndarray, now: float) -> bool:
+    def _harvest_face_jobs(
+        self,
+        display_frame: np.ndarray,
+        now: float,
+        ov: Optional[OverlayRecorder] = None,
+    ) -> bool:
         """Collect finished async watchlist futures without blocking main FPS."""
         matched_any = False
         for track_id in list(self._pending_face_jobs):
@@ -268,16 +276,20 @@ class IncidentProcessor:
                 matched_any = True
                 fx1, fy1 = fl + crop_offset[0], ft + crop_offset[1]
                 fx2, fy2 = fr + crop_offset[0], fb + crop_offset[1]
-                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
-                cv2.putText(
-                    display_frame,
-                    f"MATCH: {name.upper()} ({conf}%)",
-                    (fx1, max(20, fy1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                )
+                if ov is not None:
+                    ov.rect(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
+                    ov.text(display_frame, f"MATCH: {name.upper()} ({conf}%)", (fx1, max(20, fy1 - 6)), 0.7, (0, 0, 255), 2)
+                else:
+                    cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
+                    cv2.putText(
+                        display_frame,
+                        f"MATCH: {name.upper()} ({conf}%)",
+                        (fx1, max(20, fy1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
                 self.emit(
                     "WATCHLIST_MATCH",
                     display_frame,
@@ -298,16 +310,20 @@ class IncidentProcessor:
             if match_result is not None:
                 name, conf, (fx1, fy1, fx2, fy2) = match_result
                 matched_any = True
-                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
-                cv2.putText(
-                    display_frame,
-                    f"MATCH: {name.upper()} ({conf}%)",
-                    (fx1, max(20, fy1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                )
+                if ov is not None:
+                    ov.rect(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
+                    ov.text(display_frame, f"MATCH: {name.upper()} ({conf}%)", (fx1, max(20, fy1 - 6)), 0.7, (0, 0, 255), 2)
+                else:
+                    cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 3)
+                    cv2.putText(
+                        display_frame,
+                        f"MATCH: {name.upper()} ({conf}%)",
+                        (fx1, max(20, fy1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
                 self.emit(
                     "WATCHLIST_MATCH",
                     display_frame,
@@ -335,6 +351,7 @@ class IncidentProcessor:
 
         raw_frame = frame
         display_frame = frame.copy()
+        ov = OverlayRecorder()
         frame_h, frame_w = raw_frame.shape[:2]
 
         # Calibrate resolution-dependent thresholds & ROI polygons on first valid frame
@@ -369,9 +386,9 @@ class IncidentProcessor:
             persist=True,
             tracker=TRACKER_CONFIG,
             device=getattr(self, "_device", "cpu"),
-            half=getattr(self, "_use_half", False),
             verbose=False,
             conf=track_conf,
+            **yolo_precision_kwargs(getattr(self, "_use_half", False)),
         )[0]
 
         persons: List[Tuple[int, Tuple[int, int, int, int]]] = []
@@ -399,17 +416,9 @@ class IncidentProcessor:
                     if not point_in_roi(((x1 + x2) / 2.0, float(y2)), self._roi_polygon):
                         continue
                     persons.append((track_id, bbox))
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    ov.rect(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     label = f"Person #{track_id}" if track_id > 0 else "Person"
-                    cv2.putText(
-                        display_frame,
-                        label,
-                        (x1, max(20, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2,
-                    )
+                    ov.text(display_frame, label, (x1, max(20, y1 - 6)), 0.5, (0, 255, 0), 2)
                 elif class_id in BAGGAGE_CLASSES:
                     if confidence < BAGGAGE_CONF_FLOOR:
                         continue
@@ -419,17 +428,9 @@ class IncidentProcessor:
                     bag_name = BAGGAGE_CLASSES[class_id]
                     bags.append((track_id, bag_name, bbox))
                     color = (255, 165, 0) if confidence >= self.cfg.conf else (200, 140, 0)
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    ov.rect(display_frame, (x1, y1), (x2, y2), color, 2)
                     label = f"{bag_name} #{track_id}" if track_id > 0 else bag_name
-                    cv2.putText(
-                        display_frame,
-                        label,
-                        (x1, max(20, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        color,
-                        2,
-                    )
+                    ov.text(display_frame, label, (x1, max(20, y1 - 6)), 0.5, color, 2)
                 elif confidence >= WEAPON_CONF_THRESHOLD and any(
                     kw in class_name for kw in WEAPON_CLASS_KEYWORDS
                 ):
@@ -440,28 +441,12 @@ class IncidentProcessor:
         # Global bus camera-shake & common-mode braking sway estimation
         global_vel, is_jolt = self.motion.update(raw_frame, persons, now)
         if is_jolt:
-            cv2.putText(
-                display_frame,
-                "MOTION JOLT DAMPED",
-                (frame_w - 240, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 215, 255),
-                2,
-            )
+            ov.text(display_frame, "MOTION JOLT DAMPED", (frame_w - 240, 30), 0.55, (0, 215, 255), 2)
 
         # Pillar 1: Crowd (resolution-calibrated spatial density)
         crowd_peak = self.crowd.update(len(persons), persons=persons)
         if self.crowd.active or crowd_peak is not None:
-            cv2.putText(
-                display_frame,
-                f"OVERCROWDING: {len(persons)} PERSONS",
-                (30, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2,
-            )
+            ov.text(display_frame, f"OVERCROWDING: {len(persons)} PERSONS", (30, 75), 0.8, (0, 0, 255), 2)
         if crowd_peak is not None:
             crowd_conf = min(99.0, 70.0 + (crowd_peak / max(1, self.crowd.threshold)) * 20.0)
             self.emit(
@@ -477,15 +462,7 @@ class IncidentProcessor:
                 confidence=crowd_conf,
                 now=now,
             )
-        cv2.putText(
-            display_frame,
-            f"Persons: {len(persons)}",
-            (30, frame_h - 15),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-        )
+        ov.text(display_frame, f"Persons: {len(persons)}", (30, frame_h - 15), 0.6, (255, 255, 255), 2)
 
         # Pose pass (on clean unannotated infer_frame!)
         landmarks_by_id: Dict[int, object] = {}
@@ -527,16 +504,8 @@ class IncidentProcessor:
             ):
                 x1, y1, x2, y2 = person_bbox
                 fall_conf = 92.0 if self.pose.available else 78.0
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                cv2.putText(
-                    display_frame,
-                    f"FALL DETECTED #{track_id}",
-                    (x1, max(20, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
+                ov.rect(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                ov.text(display_frame, f"FALL DETECTED #{track_id}", (x1, max(20, y1 - 6)), 0.6, (0, 0, 255), 2)
                 self.emit(
                     "FALL_DETECTED",
                     display_frame,
@@ -567,16 +536,8 @@ class IncidentProcessor:
             if any(bbox_iou(weapon_bbox, prev_box) > 0.4 for prev_box in seen_weapon_boxes):
                 continue
             seen_weapon_boxes.append(weapon_bbox)
-            cv2.rectangle(display_frame, (wx1, wy1), (wx2, wy2), (0, 0, 255), 3)
-            cv2.putText(
-                display_frame,
-                f"WEAPON: {weapon_name.upper()} {weapon_conf:.2f}",
-                (wx1, max(20, wy1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2,
-            )
+            ov.rect(display_frame, (wx1, wy1), (wx2, wy2), (0, 0, 255), 3)
+            ov.text(display_frame, f"WEAPON: {weapon_name.upper()} {weapon_conf:.2f}", (wx1, max(20, wy1 - 6)), 0.7, (0, 0, 255), 2)
             self.emit(
                 "CRIME_WEAPON_DETECTED",
                 display_frame,
@@ -614,19 +575,11 @@ class IncidentProcessor:
                 uy1 = min(p1_box[1], p2_box[1])
                 ux2 = max(p1_box[2], p2_box[2])
                 uy2 = max(p1_box[3], p2_box[3])
-                cv2.rectangle(display_frame, (ux1, uy1), (ux2, uy2), (0, 0, 255), 3)
+                ov.rect(display_frame, (ux1, uy1), (ux2, uy2), (0, 0, 255), 3)
                 union_bbox = [ux1, uy1, ux2, uy2]
             else:
                 union_bbox = None
-            cv2.putText(
-                display_frame,
-                f"VIOLENCE #{id_a} vs #{id_b}",
-                (30, 110),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2,
-            )
+            ov.text(display_frame, f"VIOLENCE #{id_a} vs #{id_b}", (30, 110), 0.8, (0, 0, 255), 2)
             extra_v = {
                 "trackIds": [id_a, id_b],
                 "iou": round(iou, 3),
@@ -661,21 +614,13 @@ class IncidentProcessor:
             alert_type = alert.get("alert_type", "UNATTENDED_BAGGAGE")
 
             if alert_type == "BAGGAGE_THEFT_SUSPECTED":
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
+                ov.rect(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
                 suspect_str = (
                     f"SUSPECT #{alert.get('suspect_id')}"
                     if alert.get("suspect_id")
                     else "UNAUTHORIZED PICKUP"
                 )
-                cv2.putText(
-                    display_frame,
-                    f"THEFT: {suspect_str}",
-                    (x1, max(25, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 0, 255),
-                    2,
-                )
+                ov.text(display_frame, f"THEFT: {suspect_str}", (x1, max(25, y1 - 10)), 0.65, (0, 0, 255), 2)
                 self.emit(
                     "BAGGAGE_THEFT_SUSPECTED",
                     display_frame,
@@ -694,19 +639,11 @@ class IncidentProcessor:
                     now=now,
                 )
             else:
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                ov.rect(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
                 label_txt = f"UNATTENDED ({alert['unattended_s']}s)"
                 if alert.get("stranger_loitering"):
                     label_txt += f" ! STRANGER #{alert.get('suspect_id')} HOVERING"
-                cv2.putText(
-                    display_frame,
-                    label_txt,
-                    (x1, min(frame_h - 10, y2 + 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 0, 255),
-                    2,
-                )
+                ov.text(display_frame, label_txt, (x1, min(frame_h - 10, y2 + 20)), 0.5, (0, 0, 255), 2)
                 extra_payload = {
                     "objectClass": alert["cls_name"],
                     "trackId": alert["track_id"],
@@ -735,40 +672,33 @@ class IncidentProcessor:
                 del self.face_scan_times[track_id]
         self.watchlist.forget_tracks(active_person_ids)
 
-        # Pillar 6: Watchlist (non-blocking async quality-gated 2-frame consensus on raw_frame!)
+        # Pillar 6: Watchlist (non-blocking async quality-gated 2-frame consensus on CLAHE-enhanced infer_frame!)
         if FACE_BACKEND and self.watchlist.encodings:
-            matched_in_person = self._harvest_face_jobs(display_frame, now)
+            matched_in_person = self._harvest_face_jobs(display_frame, now, ov=ov)
             submitted_this_frame = False
 
-            for track_id, (x1, y1, x2, y2) in persons:
+            # Fair round-robin scan order: prioritize unconfirmed pending hits, then oldest-scanned tracks
+            ordered_persons = sorted(
+                persons,
+                key=lambda item: (
+                    0 if self.watchlist.has_pending_hit(item[0], now) else 1,
+                    self.face_scan_times.get(item[0], 0.0),
+                ),
+            )
+
+            for track_id, (x1, y1, x2, y2) in ordered_persons:
                 if self.watchlist.is_cached(track_id):
                     cached_name = self.watchlist.cache_hit(track_id)
                     if cached_name is not None:
-                        cv2.putText(
-                            display_frame,
-                            f"MATCH: {cached_name.upper()}",
-                            (x1, max(20, y1 - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (0, 0, 255),
-                            2,
-                        )
-                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                        ov.text(display_frame, f"MATCH: {cached_name.upper()}", (x1, max(20, y1 - 6)), 0.7, (0, 0, 255), 2)
+                        ov.rect(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
                         matched_in_person = True
                     continue
 
                 if track_id in self.identity_cache:
                     name = self.identity_cache[track_id]
-                    cv2.putText(
-                        display_frame,
-                        f"MATCH: {name.upper()}",
-                        (x1, max(20, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 255),
-                        2,
-                    )
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    ov.text(display_frame, f"MATCH: {name.upper()}", (x1, max(20, y1 - 6)), 0.7, (0, 0, 255), 2)
+                    ov.rect(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
                     matched_in_person = True
                     continue
 
@@ -789,7 +719,7 @@ class IncidentProcessor:
                     hx2 = min(frame_w, x2)
                     hy2 = min(frame_h, y2)
 
-                head_crop = raw_frame[hy1:hy2, hx1:hx2]
+                head_crop = infer_frame[hy1:hy2, hx1:hx2]
                 crop_offset = (hx1, hy1)
                 if head_crop.size == 0:
                     continue
@@ -836,7 +766,7 @@ class IncidentProcessor:
                 self._last_frame_face_scan = now
                 self._pending_full_face_job = self._face_executor.submit(
                     self.watchlist.match,
-                    raw_frame.copy(),
+                    infer_frame.copy(),
                     None,
                     None,
                     True,
@@ -845,6 +775,7 @@ class IncidentProcessor:
 
         # Cross-pillar event correlation
         self._correlate_events(display_frame, now)
+        self.last_overlays = ov.packet(now, frame_w, frame_h)
         return display_frame
 
 
@@ -857,6 +788,7 @@ def inference_worker(
     health_queue,
     inference_fps,
     publish_queue,
+    overlay_queue=None,
 ) -> None:
     configure_worker_logging()
     processor: Optional[IncidentProcessor] = None
@@ -877,6 +809,8 @@ def inference_worker(
             except queue.Empty:
                 continue
             annotated = processor.process_frame(frame)
+            if overlay_queue is not None and processor.last_overlays is not None:
+                put_latest(overlay_queue, processor.last_overlays)
             if publish_queue is not None:
                 put_latest(publish_queue, annotated)
             frame_count += 1

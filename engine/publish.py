@@ -8,6 +8,7 @@ from typing import Optional
 
 from engine.config import EngineConfig, WORKER_HEARTBEAT_SECONDS
 from engine.utils.queues import publish_health
+from engine.utils.overlays import render_overlays
 from engine.utils.logging import configure_worker_logging, log
 
 class MediaMTXPublisher:
@@ -24,10 +25,10 @@ class MediaMTXPublisher:
             self.cfg.ffmpeg_bin,
             "-hide_banner",
             "-loglevel", "warning",
+            "-use_wallclock_as_timestamps", "1",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-s", f"{self.cfg.width}x{self.cfg.height}",
-            "-r", str(self.cfg.fps),
             "-i", "pipe:0",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -75,12 +76,19 @@ class MediaMTXPublisher:
                     self.proc.kill()
         self.proc = None
 
-def publisher_worker(cfg: EngineConfig, publish_queue, stop_event, health_queue) -> None:
+def publisher_worker(
+    cfg: EngineConfig,
+    publish_queue,
+    stop_event,
+    health_queue,
+    overlay_queue=None,
+) -> None:
     configure_worker_logging()
     publisher = MediaMTXPublisher(cfg)
     backoff = 1.0
     last_health = 0.0
     last_frame: Optional[np.ndarray] = None
+    latest_overlays = None
     try:
         while not stop_event.is_set():
             try:
@@ -98,7 +106,20 @@ def publisher_worker(cfg: EngineConfig, publish_queue, stop_event, health_queue)
                         if last_frame is None:
                             continue
                         frame = last_frame
-                    if not publisher.write_frame(frame):
+
+                    if overlay_queue is not None:
+                        while True:
+                            try:
+                                latest_overlays = overlay_queue.get_nowait()
+                            except queue.Empty:
+                                break
+
+                    out_frame = (
+                        render_overlays(frame.copy(), latest_overlays, time.time())
+                        if latest_overlays is not None
+                        else frame
+                    )
+                    if not publisher.write_frame(out_frame):
                         raise RuntimeError("Failed writing frame to MediaMTX FFmpeg pipe")
                     now = time.monotonic()
                     if now - last_health >= WORKER_HEARTBEAT_SECONDS:

@@ -58,8 +58,12 @@ class CrowdDetector:
             ys.append((y1 + y2) / 2.0)
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-        span_x = max(1.0, max_x - min_x)
-        span_y = max(1.0, max_y - min_y)
+        # Floor each axis to at least one human body footprint (~60px at 720p)
+        # so passengers seated in a single horizontal row or spaced far apart
+        # down a straight vertical bus aisle do not collapse area -> 0.
+        min_span = max(1.0, 60.0 * scale)
+        span_x = max(min_span, max_x - min_x)
+        span_y = max(min_span, max_y - min_y)
         unit_area = _DENSITY_UNIT_AREA * (scale ** 2)
         area = span_x * span_y
         return len(persons) / (area / unit_area)

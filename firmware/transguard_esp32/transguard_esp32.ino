@@ -17,7 +17,7 @@
 // ==========================================
 // CONFIGURATION (HOTSPOT + VERIFIED CREDENTIALS)
 // ==========================================
-const char *WIFI_SSID = "Afish";
+const char *WIFI_SSID = "CCTV BROADBAND";
 const char *WIFI_PASSWORD = "Z3c0g7a1";
 
 // Telegram Bot Credentials
